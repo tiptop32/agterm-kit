@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: lint
+        name: zsh -n и shellcheck
+        entry: make lint
+        language: system
+        pass_filenames: false
+        files: '\.(zsh|sh|bash)$'
+      - id: bats
+        name: bats
+        entry: make test
+        language: system
+        pass_filenames: false
+        files: '^(wt/|tests/|install\.sh$)'
