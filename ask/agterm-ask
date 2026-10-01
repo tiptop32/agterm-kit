@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# agterm-ask: вопросы с вариантами ответа в HTML-оверлее agterm.
+# Ядро для хука Claude Code (ask-hook.sh) и MCP-сервера для Codex и OpenCode (agterm-ask-mcp).
+set -uo pipefail
+
+usage() {
+    cat <<'EOF'
+agterm-ask: вопрос с вариантами в HTML-оверлее agterm
+
+  agterm-ask [--context ТЕКСТ] < questions.json
+  agterm-ask [--context ТЕКСТ] questions.json
+  agterm-ask "Вопрос?" "Вариант 1" "Вариант 2" [...]
+
+JSON на входе в формате AskUserQuestion из Claude Code:
+  {"questions": [{"question": "...", "header": "...", "multiSelect": false,
+                  "options": [{"label": "...", "description": "...", "preview": "..."}]}]}
+От 1 до 4 вопросов, в каждом от 1 до 9 вариантов, тексты вопросов не повторяются.
+
+Вывод: {"answers": {"<вопрос>": "<ответ>"}, "annotations": {...}}, в коротком
+режиме только строка ответа. Несколько ответов склеиваются через ", ".
+
+Коды выхода:
+  0  ответ получен
+  1  ошибка во входных данных или в ответе страницы
+  2  страницу закрыли без ответа
+  3  оверлей недоступен: не agterm, нет agtermctl, enabled = no, слот занят
+EOF
+}
+
+kit_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+template=$kit_dir/ask.html
+
+log() { printf 'agterm-ask: %s\n' "$*" >&2; }
+
+started=$SECONDS
+outcome=error
+nquestions=0
+
+# След в журнале: время, агент, исход, секунды ожидания, число вопросов. Текст вопросов не пишется.
+# shellcheck disable=SC2329 # вызывается из cleanup
+trace() {
+    local file=${AGTERM_ASK_LOG-${XDG_STATE_HOME:-$HOME/.local/state}/agterm-kit/ask.log}
+    [[ -n $file && $outcome != help ]] || return 0
+    mkdir -p "$(dirname "$file")" 2>/dev/null &&
+        printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "${AGTERM_ASK_AGENT:-cli}" \
+            "$outcome" "$((SECONDS - started))" "$nquestions" >>"$file" 2>/dev/null
+    return 0
+}
+
+work=
+page_id=
+# shellcheck disable=SC2329 # вызывается из trap
+cleanup() {
+    [[ -n $work ]] && rm -rf "$work"
+    trace
+}
+trap cleanup EXIT
+
+finish() {
+    outcome=$1
+    shift
+    [[ $# -gt 0 ]] && log "$*"
+    # Страница открыта, а ответа не будет (сигнал, сбой опроса): закрыть её, иначе она
+    # займёт слот сессии. После ответа и закрытия пользователем страницы уже нет.
+    case $outcome in
+        answered | dismissed) ;;
+        *) [[ -n $page_id ]] && close_own_page ;;
+    esac
+    case $outcome in
+        answered) exit 0 ;;
+        dismissed | cancelled) exit 2 ;;
+        unavailable) exit 3 ;;
+        *) exit 1 ;;
+    esac
+}
+
+context=
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h | --help) usage; outcome=help; exit 0 ;;
+        --context) [[ $# -ge 2 ]] || finish error "--context без значения"; context=$2; shift 2 ;;
+        --) shift; break ;;
+        -*) finish error "неизвестный флаг $1, см. agterm-ask --help" ;;
+        *) break ;;
+    esac
+done
+
+command -v jq >/dev/null || finish unavailable "нет jq"
+
+short=no
+if [[ $# -ge 2 ]]; then
+    short=yes
+    request=$(jq -n -c --arg q "$1" '{questions: [{question: $q, options: ($ARGS.positional | map({label: .}))}]}' --args "${@:2}")
+elif [[ $# -eq 1 ]]; then
+    [[ -r $1 ]] || finish error "не прочитать $1"
+    request=$(cat "$1")
+else
+    request=$(cat)
+fi
+
+# Проверка входа. Сообщение об ошибке уходит агенту, поэтому оно по-английски коротко называет поле.
+problem=$(jq -r '
+    if type != "object" or (.questions | type) != "array" then "input must be {\"questions\": [...]}"
+    elif (.questions | length) < 1 or (.questions | length) > 4 then "questions: from 1 to 4 items"
+    elif any(.questions[]; (.question | type) != "string" or .question == "") then "every question needs a non-empty \"question\" string"
+    elif (.questions | map(.question) | unique | length) != (.questions | length) then "question texts must be unique"
+    elif any(.questions[]; (.options | type) != "array" or (.options | length) < 1 or (.options | length) > 9) then "every question needs \"options\": from 1 to 9 items"
+    elif any(.questions[].options[]; type != "object" or (.label | type) != "string" or .label == "") then "every option needs a non-empty \"label\" string"
+    elif any(.questions[]; has("multiSelect") and (.multiSelect | type) != "boolean") then "\"multiSelect\" must be a boolean"
+    else empty end
+' <<<"$request" 2>/dev/null) || problem="input is not valid JSON"
+[[ -z $problem ]] || finish error "$problem"
+nquestions=$(jq '.questions | length' <<<"$request")
+
+[[ ${AGTERM_ENABLED:-} == 1 && -n ${AGTERM_SESSION_ID:-} ]] || finish unavailable "не внутри agterm"
+command -v agtermctl >/dev/null || finish unavailable "нет agtermctl в PATH"
+[[ -r $template ]] || finish unavailable "нет шаблона $template"
+
+# Конфиг читается как данные: ключ = значение, # комментарий.
+enabled=yes follow=no size=80
+conf=${AGTERM_ASK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agterm-kit/ask.conf}
+if [[ -r $conf ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%%[[:space:]]#*}
+        [[ $line =~ ^[[:space:]]*([a-z]+)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]] || continue
+        key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
+        case $key in
+            enabled | follow)
+                case $value in
+                    yes | on | true | 1) printf -v "$key" yes ;;
+                    no | off | false | 0) printf -v "$key" no ;;
+                    *) log "$conf: $key = $value: ожидается yes или no" ;;
+                esac
+                ;;
+            size)
+                if [[ $value =~ ^[0-9]+$ ]] && ((10#$value <= 100)); then
+                    size=$((10#$value))
+                else
+                    log "$conf: size = $value: ожидается число от 0 до 100"
+                fi
+                ;;
+            *) log "$conf: неизвестный ключ $key" ;;
+        esac
+    done <"$conf"
+fi
+[[ $enabled == yes ]] || finish unavailable "выключено в $conf"
+
+ctl() {
+    if [[ -n ${AGTERM_SOCKET:-} ]]; then
+        agtermctl "$@" --socket "$AGTERM_SOCKET"
+    else
+        agtermctl "$@"
+    fi
+}
+
+# Закрыть свою страницу. agterm закрывает оверлей только по сессии, не по id страницы,
+# поэтому сначала проверяем, что в слоте наша страница. Между проверкой и закрытием остаётся
+# окно в миллисекунды: чужая страница попадёт под закрытие, только если её открыли ровно тогда.
+close_own_page() {
+    if ctl tree --json --window "${AGTERM_WINDOW_ID:-active}" 2>/dev/null |
+        jq -e --arg id "$page_id" '[.. | objects | select(.id? == $id and has("state"))] | length > 0' >/dev/null; then
+        ctl session overlay close --target "$AGTERM_SESSION_ID" >/dev/null 2>&1
+    fi
+}
+
+# Нас остановили (таймаут хука, отмена в MCP, Ctrl+C): finish закроет страницу.
+trap 'finish cancelled' TERM INT HUP
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/agterm-ask.XXXXXX") || finish unavailable "не создать временный каталог"
+page=$work/ask.html
+
+# "<" экранируется, чтобы текст вроде </script> не закрыл JSON-блок на странице.
+jq -n -r --rawfile tpl "$template" --argjson req "$request" --arg ctx "$context" '
+    ({questions: $req.questions, context: $ctx} | tojson | gsub("<"; "\\u003c")) as $data
+    | $tpl | split("@@ASK_DATA@@") | join($data)
+' >"$page" || finish unavailable "не собрать страницу"
+
+open_args=(session overlay open --html "$page" --js --target "$AGTERM_SESSION_ID" --json)
+((size > 0 && size < 100)) && open_args+=(--size-percent "$size")
+[[ $follow == yes ]] && open_args+=(--follow)
+
+reply=$(ctl "${open_args[@]}" 2>&1) || finish unavailable "оверлей не открылся: $reply"
+page_id=$(jq -r '.result.pageID // empty' <<<"$reply" 2>/dev/null)
+[[ -n $page_id ]] || finish unavailable "agtermctl не вернул pageID: $reply"
+
+# sleep в фоне с wait, чтобы сигнал обрабатывался сразу, а не после sleep.
+while :; do
+    result=$(ctl session overlay result --page "$page_id" --json 2>&1)
+    state=$(jq -r '.result.pageOutcome.outcome // empty' <<<"$result" 2>/dev/null)
+    case $state in
+        submitted) break ;;
+        dismissed) finish dismissed ;;
+        pending) ;;
+        *) finish unavailable "не прочитать ответ страницы: $result" ;;
+    esac
+    sleep "${AGTERM_ASK_POLL:-0.4}" &
+    wait $!
+done
+
+value=$(jq -r '.result.pageOutcome.value // empty' <<<"$result")
+
+# Ответ принимается, только если на каждый вопрос есть непустая строка и лишних ключей нет.
+answer=$(jq -n -c --argjson req "$request" --arg value "$value" '
+    ($value | fromjson? // null) as $v
+    | ($req.questions | map(.question)) as $qs
+    | if ($v | type) != "object" or ($v.answers | type) != "object" then error("ответ не объект")
+      elif ($v.answers | keys | sort) != ($qs | sort) then error("ответ не на те вопросы")
+      elif ([$v.answers[] | select(type != "string" or . == "")] | length) > 0 then error("пустой ответ")
+      else {answers: $v.answers}
+        + (if ($v.annotations | type) == "object"
+           then ($v.annotations | with_entries(select(.key as $k | $qs | index($k)))) as $a
+                | if ($a | length) > 0 then {annotations: $a} else {} end
+           else {} end)
+      end
+' 2>&1) || finish error "ответ страницы отклонён: $answer"
+
+if [[ $short == yes ]]; then
+    jq -r '.answers[]' <<<"$answer"
+else
+    printf '%s\n' "$answer"
+fi
+finish answered

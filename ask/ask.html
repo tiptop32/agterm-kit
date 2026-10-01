@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Вопрос агента</title>
+<!--
+  Шаблон оверлея для ask-hook.sh. Хук подставляет вместо маркера в блоке #ask-data
+  входные данные AskUserQuestion как JSON, где каждый "<" заменён на <.
+  Весь текст от агента попадает на страницу только через textContent: разметка
+  в вопросе показывается как текст и не исполняется.
+-->
+<style>
+  body {
+    margin: 0;
+    background: var(--agterm-background, Canvas);
+    color: var(--agterm-foreground, CanvasText);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  /* Свои имена поверх темы agterm. --agterm-* не объявляются: иначе они заменят тему. */
+  :root {
+    --fg: var(--agterm-foreground, CanvasText);
+    --accent: var(--agterm-color-4, #3b82f6);
+    --ok: var(--agterm-color-2, #16a34a);
+    --bad: var(--agterm-color-1, #dc2626);
+    --muted: color-mix(in srgb, var(--fg) 58%, transparent);
+    --line: color-mix(in srgb, var(--fg) 14%, transparent);
+    --panel: color-mix(in srgb, var(--fg) 5%, transparent);
+    --hover: color-mix(in srgb, var(--fg) 9%, transparent);
+    --picked: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .page {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 22px 24px 92px;
+    box-sizing: border-box;
+  }
+  .top { display: flex; align-items: baseline; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .top b { color: var(--fg); font-weight: 600; letter-spacing: .02em; }
+  .q {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px 18px 14px;
+    margin-bottom: 14px;
+    background: var(--panel);
+    transition: border-color .12s;
+  }
+  .q.active { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .q-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .chip {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-radius: 999px; padding: 2px 9px;
+  }
+  .mode { font-size: 11px; color: var(--muted); }
+  .done { margin-left: auto; font-size: 12px; color: var(--ok); visibility: hidden; }
+  .q.answered .done { visibility: visible; }
+  .q h2 { font-size: 16px; font-weight: 600; margin: 4px 0 12px; white-space: pre-wrap; }
+  .body { display: grid; gap: 14px; grid-template-columns: 1fr; }
+  .body.with-preview { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
+  .opts { display: flex; flex-direction: column; gap: 6px; }
+  .opt {
+    display: grid; grid-template-columns: auto auto 1fr; align-items: start; gap: 10px;
+    width: 100%; text-align: left; font: inherit; color: inherit;
+    background: transparent; border: 1px solid var(--line); border-radius: 9px;
+    padding: 9px 12px; cursor: pointer;
+  }
+  .opt:hover { background: var(--hover); }
+  .opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .opt[aria-checked="true"] { background: var(--picked); border-color: var(--accent); }
+  kbd {
+    font: 600 11px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    min-width: 18px; text-align: center; padding: 4px 5px; border-radius: 5px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .mark {
+    width: 14px; height: 14px; margin-top: 2px; box-sizing: border-box;
+    border: 1.5px solid var(--muted); border-radius: 50%;
+  }
+  .multi .mark { border-radius: 4px; }
+  .opt[aria-checked="true"] .mark { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 2.5px var(--agterm-background, Canvas); }
+  .label { font-weight: 550; }
+  .desc { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; font-weight: 400; white-space: pre-wrap; }
+  .other {
+    display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px;
+    border: 1px dashed var(--line); border-radius: 9px; padding: 6px 12px;
+  }
+  .other.filled { border-style: solid; border-color: var(--accent); background: var(--picked); }
+  .other input {
+    font: inherit; color: inherit; background: transparent; border: 0; outline: 0; padding: 4px 0; width: 100%;
+  }
+  .other input::placeholder { color: var(--muted); }
+  pre.preview {
+    margin: 0; padding: 12px 14px; border-radius: 9px; border: 1px solid var(--line);
+    background: color-mix(in srgb, var(--fg) 4%, var(--agterm-background, Canvas));
+    font: 12px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: pre; overflow: auto; max-height: 420px; min-height: 120px;
+  }
+  pre.preview.empty { color: var(--muted); white-space: normal; font-family: inherit; }
+  .bar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: color-mix(in srgb, var(--agterm-background, Canvas) 92%, var(--fg));
+    border-top: 1px solid var(--line);
+  }
+  .bar-in {
+    max-width: 920px; margin: 0 auto; padding: 12px 24px; box-sizing: border-box;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .hint { color: var(--muted); font-size: 12px; flex: 1; min-width: 200px; }
+  .hint kbd { margin: 0 2px; }
+  .err { color: var(--bad); font-size: 12px; flex-basis: 100%; }
+  .err:empty { display: none; }
+  .btn {
+    font: inherit; font-weight: 600; border-radius: 8px; padding: 8px 16px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: inherit;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--agterm-background, Canvas); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  @media (max-width: 640px) { .body.with-preview { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<script type="application/json" id="ask-data">@@ASK_DATA@@</script>
+<div class="page">
+  <div class="top"><b>Вопрос агента</b><span id="ctx"></span></div>
+  <div id="questions"></div>
+</div>
+<div class="bar"><div class="bar-in">
+  <div class="hint" id="hint"></div>
+  <button type="button" class="btn" id="to-terminal" title="Закрыть оверлей и ответить в терминале">В терминале</button>
+  <button type="button" class="btn primary" id="submit" disabled>Ответить</button>
+  <div class="err" id="err"></div>
+</div></div>
+<script>
+(function () {
+  "use strict";
+  var data = JSON.parse(document.getElementById("ask-data").textContent);
+  var questions = data.questions || [];
+  var root = document.getElementById("questions");
+  var submitBtn = document.getElementById("submit");
+  var errBox = document.getElementById("err");
+  var sent = false;
+  // Быстрый путь: один вопрос с одним ответом отправляется первым же кликом, как Enter в терминале.
+  var instant = questions.length === 1 && !questions[0].multiSelect;
+
+  if (data.context) document.getElementById("ctx").textContent = data.context;
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  var state = questions.map(function (q, qi) {
+    var s = { q: q, picked: [], other: "", buttons: [], section: null, input: null, preview: null };
+    var hasPreview = (q.options || []).some(function (o) { return o.preview; });
+
+    var section = el("section", "q" + (q.multiSelect ? " multi" : ""));
+    section.dataset.index = qi;
+    var head = el("div", "q-head");
+    if (q.header) head.appendChild(el("span", "chip", q.header));
+    head.appendChild(el("span", "mode", q.multiSelect ? "можно несколько" : "один вариант"));
+    head.appendChild(el("span", "done", "✓ выбрано"));
+    section.appendChild(head);
+    section.appendChild(el("h2", null, q.question));
+
+    var body = el("div", "body" + (hasPreview ? " with-preview" : ""));
+    var opts = el("div", "opts");
+    opts.setAttribute("role", q.multiSelect ? "group" : "radiogroup");
+
+    (q.options || []).forEach(function (o, oi) {
+      var b = el("button", "opt");
+      b.type = "button";
+      b.setAttribute("role", q.multiSelect ? "checkbox" : "radio");
+      b.setAttribute("aria-checked", "false");
+      b.appendChild(el("kbd", null, String(oi + 1)));
+      b.appendChild(el("span", "mark"));
+      var text = el("span");
+      text.appendChild(el("span", "label", o.label));
+      if (o.description) text.appendChild(el("span", "desc", o.description));
+      b.appendChild(text);
+      b.addEventListener("click", function () { pick(qi, oi); });
+      b.addEventListener("mouseenter", function () { showPreview(qi, oi); });
+      b.addEventListener("focus", function () { showPreview(qi, oi); });
+      s.buttons.push(b);
+      opts.appendChild(b);
+    });
+
+    var other = el("label", "other");
+    other.appendChild(el("kbd", null, String((q.options || []).length + 1)));
+    var input = el("input");
+    input.type = "text";
+    input.placeholder = "Свой вариант…";
+    input.addEventListener("input", function () {
+      s.other = input.value.trim();
+      if (s.other && !q.multiSelect) s.picked = [];
+      render(qi);
+    });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && s.other) {
+        e.preventDefault();
+        if (instant) submit(); else advance(qi);
+      }
+    });
+    other.appendChild(input);
+    opts.appendChild(other);
+    s.input = input;
+    s.other_row = other;
+    opts.addEventListener("mouseleave", function () { showPicked(qi); });
+    body.appendChild(opts);
+
+    if (hasPreview) {
+      s.preview = el("pre", "preview empty", "Наведите на вариант, чтобы увидеть пример");
+      body.appendChild(s.preview);
+    }
+    section.appendChild(body);
+    section.addEventListener("focusin", function () { setActive(qi); });
+    section.addEventListener("mousedown", function () { setActive(qi); });
+    s.section = section;
+    root.appendChild(section);
+    return s;
+  });
+
+  var active = 0;
+  function setActive(qi) {
+    active = qi;
+    state.forEach(function (s, i) { s.section.classList.toggle("active", i === qi); });
+  }
+
+  function showPreview(qi, oi) {
+    var s = state[qi];
+    if (!s.preview) return;
+    var p = s.q.options[oi].preview;
+    s.preview.className = "preview" + (p ? "" : " empty");
+    s.preview.textContent = p || "У этого варианта нет примера";
+  }
+
+  // Без наведения превью показывает выбранный вариант.
+  function showPicked(qi) {
+    var s = state[qi];
+    if (s.preview && s.picked.length === 1) showPreview(qi, s.picked[0]);
+  }
+
+  function answered(s) { return s.picked.length > 0 || s.other !== ""; }
+
+  function render(qi) {
+    var s = state[qi];
+    s.buttons.forEach(function (b, oi) {
+      b.setAttribute("aria-checked", s.picked.indexOf(oi) >= 0 ? "true" : "false");
+    });
+    s.other_row.classList.toggle("filled", s.other !== "");
+    s.section.classList.toggle("answered", answered(s));
+    submitBtn.disabled = sent || !state.every(answered);
+  }
+
+  function pick(qi, oi) {
+    var s = state[qi];
+    setActive(qi);
+    if (s.q.multiSelect) {
+      var at = s.picked.indexOf(oi);
+      if (at >= 0) s.picked.splice(at, 1); else s.picked.push(oi);
+      s.picked.sort(function (a, b) { return a - b; });
+    } else {
+      s.picked = [oi];
+      s.other = "";
+      s.input.value = "";
+    }
+    render(qi);
+    if (!s.q.multiSelect) {
+      if (instant) submit(); else advance(qi);
+    }
+  }
+
+  // После ответа фокус уходит на следующий вопрос без ответа, а когда отвечено всё, на кнопку.
+  function advance(qi) {
+    for (var k = 1; k <= state.length; k++) {
+      var j = (qi + k) % state.length;
+      if (!answered(state[j])) { focusQuestion(j); return; }
+    }
+    submitBtn.focus();
+  }
+
+  function focusQuestion(qi) {
+    setActive(qi);
+    var s = state[qi];
+    var target = s.buttons[s.picked.length ? s.picked[0] : 0] || s.input;
+    target.focus();
+    s.section.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  function collect() {
+    var answers = {}, annotations = {};
+    state.forEach(function (s) {
+      var labels = s.picked.map(function (oi) { return s.q.options[oi].label; });
+      if (s.other) labels.push(s.other);
+      answers[s.q.question] = labels.join(", ");
+      if (!s.q.multiSelect && s.picked.length === 1 && s.q.options[s.picked[0]].preview) {
+        annotations[s.q.question] = { preview: s.q.options[s.picked[0]].preview };
+      }
+    });
+    var out = { answers: answers };
+    if (Object.keys(annotations).length) out.annotations = annotations;
+    return out;
+  }
+
+  function bridge(cmd, opts) {
+    if (!window.agterm || typeof window.agterm.request !== "function") {
+      return Promise.reject(new Error("нет моста agterm: страница открыта без --js или не в agterm"));
+    }
+    return window.agterm.request(cmd, opts || {});
+  }
+
+  function fail(e) {
+    sent = false;
+    errBox.textContent = "Не удалось отправить ответ: " + (e && e.message ? e.message : e);
+    state.forEach(function (_, i) { render(i); });
+  }
+
+  function submit() {
+    if (sent || !state.every(answered)) return;
+    sent = true;
+    submitBtn.disabled = true;
+    errBox.textContent = "";
+    bridge("session.overlay.submit", { args: { value: JSON.stringify(collect()) } }).catch(fail);
+  }
+
+  function toTerminal() {
+    if (sent) return;
+    bridge("session.overlay.close").catch(fail);
+  }
+
+  submitBtn.addEventListener("click", submit);
+  document.getElementById("to-terminal").addEventListener("click", toTerminal);
+
+  document.addEventListener("keydown", function (e) {
+    var typing = e.target && e.target.tagName === "INPUT";
+    if (e.key === "Escape") {
+      if (typing && e.target.value) { e.target.value = ""; e.target.dispatchEvent(new Event("input")); return; }
+      e.preventDefault(); toTerminal(); return;
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); return; }
+    if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+    var s = state[active];
+    if (!s) return;
+    if (/^[1-9]$/.test(e.key)) {
+      var n = Number(e.key) - 1;
+      if (n < s.buttons.length) { e.preventDefault(); s.buttons[n].focus(); pick(active, n); }
+      else if (n === s.buttons.length) { e.preventDefault(); s.input.focus(); }
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      var items = s.buttons.concat([s.input]);
+      var at = items.indexOf(document.activeElement);
+      var next = e.key === "ArrowDown" ? at + 1 : at - 1;
+      if (next >= items.length && active + 1 < state.length) { e.preventDefault(); focusQuestion(active + 1); return; }
+      if (next < 0 && active > 0) { e.preventDefault(); var p = state[active - 1]; setActive(active - 1); p.input.focus(); return; }
+      next = Math.max(0, Math.min(items.length - 1, next));
+      e.preventDefault();
+      items[next].focus();
+    }
+  });
+
+  var hint = document.getElementById("hint");
+  var parts = [["1–9", "выбрать"], ["↑↓", "перейти"]];
+  if (!instant) parts.push(["⌘↩", "ответить"]);
+  parts.push(["Esc", "в терминал"]);
+  parts.forEach(function (p, i) {
+    if (i) hint.appendChild(document.createTextNode("  ·  "));
+    hint.appendChild(el("kbd", null, p[0]));
+    hint.appendChild(document.createTextNode(" " + p[1]));
+  });
+  if (instant) submitBtn.hidden = true;
+
+  setActive(0);
+  if (state.length) focusQuestion(0);
+  state.forEach(function (_, i) { render(i); });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# agterm-ask-mcp: stdio MCP-сервер с одним инструментом ask_user для Codex, OpenCode
+# и любого другого MCP-клиента. Вопрос показывает agterm-ask в HTML-оверлее agterm.
+#
+# Протокол: JSON-RPC 2.0, одно сообщение на строку. Основной цикл читает stdin блокирующим read:
+# в bash 3.2 (системный на macOS) read -t по таймауту и на EOF возвращает один и тот же код.
+# Вопрос ждёт фоновый наблюдатель: он запускает agterm-ask, раз в AGTERM_ASK_PROGRESS секунд
+# шлёт notifications/progress и сам отправляет результат. OpenCode сбрасывает таймаут вызова
+# по прогрессу, Codex ждёт tool_timeout_sec из своего конфига.
+set -uo pipefail
+
+kit_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+ask=$kit_dir/agterm-ask
+version=1.0.0
+progress_every=${AGTERM_ASK_PROGRESS:-10}
+
+client=mcp
+child="" child_id=""
+work=$(mktemp -d "${TMPDIR:-/tmp}/agterm-ask-mcp.XXXXXX") || exit 1
+
+# Остановить наблюдателя: он передаст сигнал agterm-ask, а тот закроет свою страницу.
+stop_child() {
+    [[ -n $child ]] || return 0
+    kill -TERM "$child" 2>/dev/null
+    wait "$child" 2>/dev/null
+    child=
+}
+trap 'stop_child; rm -rf "$work"' EXIT
+trap 'exit 0' TERM INT HUP
+
+# В stdout пишут два процесса: цикл и наблюдатель. Строка длиннее PIPE_BUF может
+# перемешаться с чужой, поэтому запись идёт под блокировкой-каталогом.
+# holding отмечает захваченную блокировку: если наблюдателя остановят посреди записи,
+# его обработчик TERM её освободит, иначе следующий send ждал бы вечно.
+holding=0
+send() {
+    until mkdir "$work/lock" 2>/dev/null; do sleep 0.01; done
+    holding=1
+    printf '%s\n' "$1"
+    rmdir "$work/lock"
+    holding=0
+}
+
+respond() { send "$(jq -c -n --argjson id "$1" --argjson r "$2" '{jsonrpc: "2.0", id: $id, result: $r}')"; }
+
+respond_error() {
+    send "$(jq -c -n --argjson id "$1" --argjson c "$2" --arg m "$3" '{jsonrpc: "2.0", id: $id, error: {code: $c, message: $m}}')"
+}
+
+tool_text() {
+    respond "$1" "$(jq -c -n --arg t "$2" --argjson e "${3:-false}" '{content: [{type: "text", text: $t}], isError: $e}')"
+}
+
+read -r -d '' tool <<'EOF'
+{
+  "name": "ask_user",
+  "title": "Ask the user",
+  "description": "Ask the user one to four multiple-choice questions in a native agterm dialog and wait for the answer. Use it whenever you would otherwise list options in chat and ask the user to pick one: choosing an approach, confirming a risky step, picking a name, a library or a scope. Prefer it over plain-text questions and over built-in question tools. Keep labels short (1-5 words), put details into description, and put code or config samples into preview. The user can always type an answer of their own instead of the options. The result is a JSON object mapping each question text to the chosen label; multiple answers are joined with \", \". If the dialog is unavailable or closed, the result says so: then ask in chat.",
+  "inputSchema": {
+    "type": "object",
+    "required": ["questions"],
+    "additionalProperties": false,
+    "properties": {
+      "questions": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 4,
+        "items": {
+          "type": "object",
+          "required": ["question", "options"],
+          "additionalProperties": false,
+          "properties": {
+            "question": {"type": "string", "description": "Full question text, unique within the call"},
+            "header": {"type": "string", "description": "Very short chip label, up to 12 characters"},
+            "multiSelect": {"type": "boolean", "description": "Allow choosing several options"},
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 9,
+              "items": {
+                "type": "object",
+                "required": ["label"],
+                "additionalProperties": false,
+                "properties": {
+                  "label": {"type": "string", "description": "Option text, 1-5 words"},
+                  "description": {"type": "string", "description": "What choosing it means, trade-offs"},
+                  "preview": {"type": "string", "description": "Optional monospace sample shown beside the options"}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+}
+EOF
+
+instructions='When you want the user to choose between options, call ask_user instead of listing the options in chat. It opens a dialog in the agterm terminal and returns the answer.'
+
+start_ask() {
+    local id=$1 params=$2
+    if [[ -n $child ]] && kill -0 "$child" 2>/dev/null; then
+        tool_text "$id" "Another ask_user question is still open. Wait for its answer before asking again." true
+        return
+    fi
+    [[ -n $child ]] && wait "$child" 2>/dev/null
+    jq -c '.arguments // {}' <<<"$params" >"$work/request.json"
+    watch_ask "$id" "$(jq -c '._meta.progressToken // empty' <<<"$params")" &
+    child=$! child_id=$id
+}
+
+# Отмена наблюдателя: передать сигнал agterm-ask (тот закроет страницу) и освободить
+# блокировку stdout. До запуска agterm-ask только запоминаем отмену.
+# shellcheck disable=SC2329 # вызывается из trap
+cancel_watch() {
+    ((holding)) && rmdir "$work/lock" 2>/dev/null
+    if [[ -z $pid ]]; then
+        cancelled=1
+        return
+    fi
+    kill -TERM "$pid" 2>/dev/null
+    wait "$pid"
+    exit 0
+}
+
+# Фоновый наблюдатель одного вопроса: ждёт agterm-ask, шлёт прогресс, отправляет результат.
+watch_ask() {
+    local id=$1 token=$2 project=${PWD##*/} pid status reason tick=0 since=$SECONDS label
+    # Подпись на странице: имя агента для человека. В журнал идёт исходное имя клиента.
+    case $client in
+        codex*) label=Codex ;;
+        opencode*) label=OpenCode ;;
+        *) label=$client ;;
+    esac
+    trap - EXIT
+    # Обработчик ставится до запуска agterm-ask: отмена, пришедшая в этот промежуток,
+    # не должна оставить вопрос висеть без наблюдателя.
+    pid=
+    trap 'cancel_watch' TERM
+    AGTERM_ASK_AGENT=${AGTERM_ASK_AGENT:-$client} \
+        "$ask" --context "$label${project:+ · $project}" <"$work/request.json" >"$work/out" 2>"$work/err" &
+    pid=$!
+    [[ -n ${cancelled:-} ]] && cancel_watch
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.2 &
+        wait $!
+        if [[ -n $token ]] && ((SECONDS - since >= progress_every)); then
+            tick=$((tick + 1))
+            since=$SECONDS
+            send "$(jq -c -n --argjson t "$token" --argjson p "$tick" \
+                '{jsonrpc: "2.0", method: "notifications/progress", params: {progressToken: $t, progress: $p, message: "waiting for the user to answer in agterm"}}')"
+        fi
+    done
+    wait "$pid"
+    status=$?
+    reason=$(tail -n 1 "$work/err" | sed 's/^agterm-ask: //')
+    case $status in
+        0)
+            tool_text "$id" "$(jq -r '"The user answered:\n"
+                + (.answers | to_entries | map("- \(.key) -> \(.value)") | join("\n"))
+                + "\n\n" + tojson' "$work/out")"
+            ;;
+        2) tool_text "$id" "The user closed the dialog without answering. Do not assume an answer: ask in chat if you still need one." ;;
+        3) tool_text "$id" "The agterm dialog is unavailable (${reason:-unknown reason}). Ask the user in chat instead." ;;
+        *) tool_text "$id" "ask_user failed: ${reason:-unknown error}" true ;;
+    esac
+}
+
+handle() {
+    local msg=$1 method id params
+    method=$(jq -r '.method // empty' <<<"$msg" 2>/dev/null) || {
+        send '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}'
+        return
+    }
+    id=$(jq -c '.id // empty' <<<"$msg")
+    params=$(jq -c '.params // {}' <<<"$msg")
+    case $method in
+        initialize)
+            client=$(jq -r '.clientInfo.name // "mcp"' <<<"$params")
+            respond "$id" "$(jq -c -n --arg v "$(jq -r '.protocolVersion // ""' <<<"$params")" \
+                --arg ver "$version" --arg ins "$instructions" '{
+                protocolVersion: (if ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"] | index($v) then $v else "2025-06-18" end),
+                capabilities: {tools: {listChanged: false}},
+                serverInfo: {name: "agterm-ask", version: $ver},
+                instructions: $ins
+            }')"
+            ;;
+        ping) respond "$id" '{}' ;;
+        tools/list) respond "$id" "$(jq -c '{tools: [.]}' <<<"$tool")" ;;
+        tools/call)
+            if [[ $(jq -r '.name // empty' <<<"$params") == ask_user ]]; then
+                start_ask "$id" "$params"
+            else
+                respond_error "$id" -32602 "Unknown tool: $(jq -r '.name // ""' <<<"$params")"
+            fi
+            ;;
+        notifications/cancelled)
+            if [[ -n $child && $(jq -c '.requestId' <<<"$params") == "$child_id" ]]; then
+                stop_child
+            fi
+            ;;
+        notifications/* | "") ;;
+        *) [[ -n $id ]] && respond_error "$id" -32601 "Method not found: $method" ;;
+    esac
+}
+
+while IFS= read -r line || [[ -n $line ]]; do
+    [[ -n $line ]] && handle "$line"
+done

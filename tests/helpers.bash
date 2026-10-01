@@ -25,7 +25,7 @@ setup_env() {
     git config --global init.defaultBranch main
     git config --global advice.detachedHead false
 
-    unset WT_ROOT WT_REPOS WT_CONFIG WT_AGENT WT_CLAUDE WT_NEW_SESSION WT_CLAUDE_CMD WT_CODEX_CMD ZDOTDIR
+    unset WT_ROOT WT_REPOS WT_CONFIG WT_AGENT WT_CLAUDE WT_NEW_SESSION WT_CLAUDE_CMD WT_CODEX_CMD ZDOTDIR CLAUDE_CONFIG_DIR CODEX_HOME
 
     # Поддельный agtermctl: пишет вызовы в лог и отдаёт дерево с одним воркспейсом.
     # Id в дереве в нижнем регистре, в окружении в верхнем: agterm сравнивает их без учёта регистра.
@@ -68,6 +68,44 @@ push_to_origin() {
     git -C "$tmp" add "$file"
     git -C "$tmp" commit -qm "add $file"
     git -C "$tmp" push -q origin main
+}
+
+# setup_ask_env: окружение для agterm-ask, ask-hook.sh и agterm-ask-mcp поверх setup_env.
+# Поддельный agtermctl для оверлея: open отдаёт pageID и сохраняет страницу в $T/page.html,
+# result отдаёт исход из FAKE_OUTCOME (по умолчанию submitted) со значением FAKE_VALUE.
+setup_ask_env() {
+    unset AGTERM_SOCKET AGTERM_ASK_CONFIG AGTERM_ASK_AGENT AGTERM_ASK_PROGRESS
+    unset FAKE_OPEN_FAIL FAKE_OUTCOME FAKE_VALUE
+    export AGTERM_WINDOW_ID=WIN-1 AGTERM_ASK_POLL=0.05 AGTERM_ASK_LOG=$T/ask.log TMPDIR=$T/tmp
+    mkdir -p "$TMPDIR"
+
+    cat > "$T/bin/agtermctl" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$FAKE_AGTERM_LOG"
+case "$1 $2 $3" in
+"session overlay open")
+    if [ -n "$FAKE_OPEN_FAIL" ]; then echo "Error: overlay already open" >&2; exit 1; fi
+    while [ $# -gt 0 ]; do
+        [ "$1" = --html ] && cp "$2" "$T/page.html"
+        shift
+    done
+    echo '{"result":{"pageID":"PAGE-1"}}'
+    ;;
+"session overlay result")
+    jq -n --arg o "${FAKE_OUTCOME:-submitted}" --arg v "$FAKE_VALUE" \
+        '{result: {pageOutcome: ({pageID: "PAGE-1", outcome: $o} + (if $o == "submitted" then {value: $v} else {} end))}}'
+    ;;
+"tree --json --window")
+    echo '{"result":{"tree":{"htmlOverlays":[{"id":"PAGE-1","state":"loaded","file":"x"}]}}}'
+    ;;
+esac
+EOF
+    chmod +x "$T/bin/agtermctl"
+}
+
+# page_data: JSON-блок с вопросами со страницы, которую сохранил поддельный agtermctl.
+page_data() {
+    sed -n 's/.*<script type="application\/json" id="ask-data">\(.*\)<\/script>.*/\1/p' "$T/page.html"
 }
 
 write_config() {
