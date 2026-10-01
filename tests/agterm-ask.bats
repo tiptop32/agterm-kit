@@ -79,6 +79,32 @@ EOF
     [ ! -e "$FAKE_AGTERM_LOG" ]
 }
 
+@test "config agents: only listed agents get the overlay" {
+    export AGTERM_ASK_CONFIG=$T/ask.conf FAKE_VALUE='{"answers":{"Q?":"A"}}'
+    echo "agents = codex,  opencode   # только они" > "$AGTERM_ASK_CONFIG"
+
+    AGTERM_ASK_AGENT=claude-code run --separate-stderr "$ASK" "Q?" A B
+    [ "$status" -eq 3 ]
+    [[ $stderr == *"оверлей выключен для агента claude"* ]]
+    [ ! -e "$FAKE_AGTERM_LOG" ]
+
+    AGTERM_ASK_AGENT=codex-mcp-client run --separate-stderr "$ASK" "Q?" A B
+    [ "$status" -eq 0 ]
+    [ "$output" = A ]
+
+    echo "agents = all" > "$AGTERM_ASK_CONFIG"
+    AGTERM_ASK_AGENT=claude-code run --separate-stderr "$ASK" "Q?" A B
+    [ "$status" -eq 0 ]
+}
+
+@test "config agents: a bad value is reported and ignored" {
+    export AGTERM_ASK_CONFIG=$T/ask.conf FAKE_VALUE='{"answers":{"Q?":"A"}}'
+    echo 'agents = codex; rm -rf /' > "$AGTERM_ASK_CONFIG"
+    AGTERM_ASK_AGENT=claude-code run --separate-stderr "$ASK" "Q?" A B
+    [ "$status" -eq 0 ]
+    [[ $stderr == *"agents = codex; rm -rf /: ожидается all"* ]]
+}
+
 @test "broken result after open closes its own page and exits 3" {
     export FAKE_OUTCOME=broken
     run --separate-stderr "$ASK" "Q?" A B

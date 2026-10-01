@@ -179,12 +179,13 @@ EOF
 fi
 
 # OpenCode: MCP-сервер в opencode.json, если OpenCode установлен. Флаг enabled,
-# выставленный вручную, сохраняется. opencode.jsonc с комментариями jq не разберёт.
+# выставленный вручную, сохраняется. opencode.jsonc с комментариями jq не разберёт, но OpenCode
+# сливает opencode.json и opencode.jsonc из одного каталога (проверено на 1.18.31): запись
+# ложится в opencode.json рядом, а .jsonc остаётся нетронутым.
 opencode_dir=$config_home/opencode
 if [[ -d $opencode_dir ]]; then
-    if [[ -f $opencode_dir/opencode.jsonc && ! -f $opencode_dir/opencode.json ]]; then
-        echo "OpenCode: конфиг в opencode.jsonc, добавьте в него вручную:"
-        echo "  \"mcp\": {\"agterm-ask\": {\"type\": \"local\", \"command\": [\"$mcp\"]}}"
+    if grep -qs '"agterm-ask"' "$opencode_dir/opencode.jsonc"; then
+        echo "ok: MCP-сервер agterm-ask в $opencode_dir/opencode.jsonc прописан вручную, не трогаю"
     else
         # shellcheck disable=SC2016 # $cmd раскрывает jq
         update_json "$opencode_dir/opencode.json" "MCP-сервер agterm-ask для OpenCode" '

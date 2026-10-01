@@ -198,12 +198,21 @@ setup() {
     } and ."$schema" == "https://opencode.ai/config.json"' "$XDG_CONFIG_HOME/opencode/opencode.json"
 }
 
-@test "ask: opencode with only opencode.jsonc gets a hint, file untouched" {
+@test "ask: opencode.jsonc stays untouched, the server goes into opencode.json beside it" {
     mkdir -p "$XDG_CONFIG_HOME/opencode"
-    printf '// мой конфиг\n{}\n' > "$XDG_CONFIG_HOME/opencode/opencode.jsonc"
+    printf '// мой конфиг\n{"mcp": {"x": {"type": "local", "command": ["x"]}}}\n' > "$XDG_CONFIG_HOME/opencode/opencode.jsonc"
+    cp "$XDG_CONFIG_HOME/opencode/opencode.jsonc" "$T/before.jsonc"
     run "$KIT_DIR/install.sh"
     [ "$status" -eq 0 ]
-    [[ $output == *"добавьте в него вручную"* ]]
-    [ "$(cat "$XDG_CONFIG_HOME/opencode/opencode.jsonc")" = "$(printf '// мой конфиг\n{}')" ]
+    cmp "$T/before.jsonc" "$XDG_CONFIG_HOME/opencode/opencode.jsonc"
+    jq -e --arg cmd "$KIT_DIR/ask/agterm-ask-mcp" '.mcp == {"agterm-ask": {type: "local", command: [$cmd]}}' \
+        "$XDG_CONFIG_HOME/opencode/opencode.json"
+}
+
+@test "ask: agterm-ask written by hand in opencode.jsonc is left alone" {
+    mkdir -p "$XDG_CONFIG_HOME/opencode"
+    printf '// мой\n{"mcp": {"agterm-ask": {"type": "local", "command": ["/mine"]}}}\n' > "$XDG_CONFIG_HOME/opencode/opencode.jsonc"
+    run "$KIT_DIR/install.sh"
+    [[ $output == *"opencode.jsonc прописан вручную, не трогаю"* ]]
     [ ! -e "$XDG_CONFIG_HOME/opencode/opencode.json" ]
 }

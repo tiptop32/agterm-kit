@@ -117,7 +117,7 @@ command -v agtermctl >/dev/null || finish unavailable "нет agtermctl в PATH"
 [[ -r $template ]] || finish unavailable "нет шаблона $template"
 
 # Конфиг читается как данные: ключ = значение, # комментарий.
-enabled=yes follow=no size=80
+enabled=yes follow=no size=80 agents=all
 conf=${AGTERM_ASK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agterm-kit/ask.conf}
 if [[ -r $conf ]]; then
     while IFS= read -r line || [[ -n $line ]]; do
@@ -139,11 +139,30 @@ if [[ -r $conf ]]; then
                     log "$conf: size = $value: ожидается число от 0 до 100"
                 fi
                 ;;
+            agents)
+                if [[ $value =~ ^[a-z0-9_.,[:space:]-]+$ ]]; then
+                    agents=$(tr ',' ' ' <<<"$value")
+                else
+                    log "$conf: agents = $value: ожидается all или список вроде claude, codex, opencode"
+                fi
+                ;;
             *) log "$conf: неизвестный ключ $key" ;;
         esac
     done <"$conf"
 fi
 [[ $enabled == yes ]] || finish unavailable "выключено в $conf"
+
+# Короткое имя агента для ключа agents: имя MCP-клиента бывает длиннее (codex-mcp-client).
+case ${AGTERM_ASK_AGENT:-cli} in
+    claude*) agent=claude ;;
+    codex*) agent=codex ;;
+    opencode*) agent=opencode ;;
+    *) agent=${AGTERM_ASK_AGENT:-cli} ;;
+esac
+# shellcheck disable=SC2086 # список из конфига делится по пробелам намеренно
+if [[ " $agents " != *" all "* && " $(printf '%s ' $agents)" != *" $agent "* ]]; then
+    finish unavailable "оверлей выключен для агента $agent: agents = $agents в $conf"
+fi
 
 ctl() {
     if [[ -n ${AGTERM_SOCKET:-} ]]; then
