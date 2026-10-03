@@ -114,6 +114,7 @@ write_config() {
 }
 
 # wtsh <команды zsh>: выполнить с загруженным wt.zsh в чистом zsh без rc-файлов.
+# Стартуем из $HOME: он вне git, иначе wt взял бы репу из каталога, где запущен bats.
 wtsh() {
-    zsh -f -c "source '$WT_ZSH'; $1"
+    (cd "$HOME" && zsh -f -c "source '$WT_ZSH'; $1")
 }

@@ -107,7 +107,7 @@ _wt_help() {
     fi
 
     cat <<EOF
-${b}wt${n} — git worktree для реп из каталогов конфига
+${b}wt${n} — git worktree для текущей репы или реп из каталогов конфига
 
 ${b}КОМАНДЫ${n}
   ${b}wt${n} [-a <агент>] <постфикс>
@@ -120,15 +120,17 @@ ${b}КОНФИГ${n} $(_wt_config_path)
   root  = ~/wt              ${d}# куда класть worktree: <root>/<репа>/<постфикс>${n}
   repos = ~/git             ${d}# где искать репы; ключ можно повторять${n}
   repos = ~/work/git
+  repos = ~/warp            ${d}# можно указать и саму репу${n}
 
   Сейчас: root ${root}
           repos ${repos}
 
 ${b}КАК РАБОТАЕТ wt${n}
-  Репа берётся из ${b}имени воркспейса agterm${n} ${d}(воркспейс qa-tools → репа qa-tools)${n},
-  поэтому аргумент — только постфикс (имя ветки). Каталоги repos просматриваются
-  по порядку, при одинаковых именах выигрывает первый. Вне agterm или если репы
-  с таким именем нет ни в одном каталоге — ошибка.
+  Аргумент — только постфикс (имя ветки), репа определяется так:
+    1. ${b}текущий каталог${n}, если он внутри git-репы ${d}(из worktree — его основной клон)${n};
+    2. иначе ${b}имя воркспейса agterm${n} ${d}(воркспейс qa-tools → репа qa-tools)${n}, которое
+       ищется в repos по порядку; при одинаковых именах выигрывает первый.
+  Не в git-репе и вне agterm, или репы с именем воркспейса нигде нет — ошибка.
 
   Агент запускается в ${b}текущей${n} вкладке; WT_NEW_SESSION=1 — в отдельной.
   По умолчанию это claude. Выбрать codex: ${b}--agent codex${n} или ${b}-a codex${n}.
@@ -160,7 +162,7 @@ ${b}ПЕРЕМЕННЫЕ${n}
   ${b}WT_NEW_SESSION${n}=1        агент в ОТДЕЛЬНОЙ вкладке agterm ${d}(по умолчанию — в текущей)${n}
 
 ${b}ПРИМЕРЫ${n}
-  ${d}# в воркспейсе qa-tools: worktree с веткой fix-login, сразу с claude${n}
+  ${d}# в каталоге ~/warp (или в воркспейсе qa-tools): worktree с веткой fix-login и claude${n}
   wt fix-login
 
   ${d}# тот же сценарий, но запустить Codex${n}
@@ -182,23 +184,47 @@ ${b}УДАЛЕНИЕ${n}
 EOF
 }
 
-# Все репы из каталогов repos, по строке «имя<TAB>путь», в порядке конфига.
+# Все репы из repos, по строке «имя<TAB>путь», в порядке конфига. Элемент repos —
+# либо каталог с клонами, либо сам клон (repos = ~/warp): тогда это одна репа.
 _wt_repos() {
     local dir d
     for dir in $_wt_repo_dirs; do
+        if [[ -d $dir/.git ]]; then
+            print -r -- "${dir:t}"$'\t'"$dir"
+            continue
+        fi
         for d in "$dir"/*(/N); do
             [[ -d $d/.git ]] && print -r -- "${d:t}"$'\t'"$d"
         done
     done
 }
 
-# Путь репы по точному имени: первый каталог из repos, где она есть.
+# Путь репы по точному имени: первый элемент repos, где она есть.
 _wt_repo_path() {
     local dir
     for dir in $_wt_repo_dirs; do
+        if [[ -d $dir/.git ]]; then
+            [[ ${dir:t} == $1 ]] && { print -r -- "$dir"; return 0 }
+            continue
+        fi
         [[ -d $dir/$1/.git ]] && { print -r -- "$dir/$1"; return 0 }
     done
     return 1
+}
+
+# Основной клон репы, в которой стоит шелл. Из worktree тоже отдаёт основной клон,
+# поэтому wt внутри worktree заводит соседний, а не вложенный.
+_wt_cwd_repo() {
+    local top common
+    top=$(git rev-parse --show-toplevel 2>/dev/null) && [[ -n $top ]] || return 1
+    common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    # У обычного клона и его worktree common-dir — это <клон>/.git. У сабмодуля он
+    # лежит в .git/modules родителя, тогда репа — сам toplevel.
+    if [[ ${common:t} == .git ]]; then
+        print -r -- "${common:h}"
+    else
+        print -r -- "$top"
+    fi
 }
 
 # Базовая ветка репы: origin/HEAD, с фолбэком на первую существующую из main/master/static-dev.
@@ -298,11 +324,10 @@ _wt_resolve() {
 }
 
 # Путь репы из текущего воркспейса agterm. Воркспейсы названы по репам (qa-tools, ...),
-# поэтому первый аргумент не нужен. Без agterm или если репы с именем воркспейса нет
-# ни в одном каталоге repos — ошибка (осознанно, без фолбэка по git-каталогу).
+# поэтому первый аргумент не нужен. Зовётся, только когда текущий каталог не в git-репе.
 _wt_workspace_repo() {
     [[ -n $AGTERM_ENABLED && -n $AGTERM_WORKSPACE_ID ]] || {
-        print -u2 "wt: не в agterm — репу беру из имени воркспейса, иначе никак"
+        print -u2 "wt: текущий каталог не в git-репе, а вне agterm репу взять больше неоткуда"
         return 1
     }
     (( $+commands[agtermctl] )) || { print -u2 "wt: agtermctl не найден"; return 1 }
@@ -370,7 +395,7 @@ wt() {
     done
 
     if [[ -z $suffix ]]; then
-        print -u2 "usage: wt [-a claude|codex|none] <постфикс>   (репа — из воркспейса agterm; wt -h — подробнее)"
+        print -u2 "usage: wt [-a claude|codex|none] <постфикс>   (репа — текущая или из воркспейса agterm; wt -h — подробнее)"
         return 2
     fi
 
@@ -387,9 +412,9 @@ wt() {
 
     _wt_load_config || return 1
 
-    # Репа определяется по имени воркспейса agterm, а не аргументом.
+    # Репа — та, в которой стоим; вне git-репы — по имени воркспейса agterm.
     local src
-    src=$(_wt_workspace_repo) || return 1
+    src=$(_wt_cwd_repo) || src=$(_wt_workspace_repo) || return 1
 
     local repo=${src:t}
     local dest="$_wt_root/$repo/$suffix"

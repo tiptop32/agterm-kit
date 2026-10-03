@@ -180,11 +180,56 @@ setup() {
     [ ! -e "$HOME/wt/api/feat-y" ]
 }
 
-@test "wt refuses outside agterm" {
+@test "wt refuses outside git repo and outside agterm" {
     unset AGTERM_ENABLED
     run wtsh 'wt feat-x'
     [ "$status" -eq 1 ]
-    [[ $output == *"не в agterm"* ]]
+    [[ $output == *"не в git-репе, а вне agterm"* ]]
+}
+
+# --- репа из текущего каталога --------------------------------------------
+
+@test "wt in a repo outside repos dirs uses it, not the workspace repo" {
+    make_repo "$T/elsewhere" warp
+    # Воркспейс называется иначе и указывает на другую репу: текущий каталог главнее.
+    export FAKE_WS_NAME=api
+    mkdir -p "$T/elsewhere/warp/sub"
+    run wtsh "cd '$T/elsewhere/warp/sub' && wt -a none feat-x"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$HOME/wt/warp/feat-x" rev-parse --git-common-dir)" = "$T/elsewhere/warp/.git" ]
+    [ ! -e "$HOME/wt/api" ]
+}
+
+@test "wt inside a worktree makes a sibling from the main clone" {
+    export FAKE_WS_NAME=blog
+    wtsh 'wt -a none feat-a' >/dev/null
+    export FAKE_WS_NAME=api
+    run wtsh "cd '$HOME/wt/blog/feat-a' && wt -a none feat-b && print -r -- \"PWD=\$PWD\""
+    [ "$status" -eq 0 ]
+    [[ $output == *"PWD=$HOME/wt/blog/feat-b"* ]]
+    [ "$(git -C "$HOME/wt/blog/feat-b" rev-parse --git-common-dir)" = "$T/personal/blog/.git" ]
+}
+
+@test "wt works in a repo outside agterm" {
+    unset AGTERM_ENABLED AGTERM_WORKSPACE_ID
+    run wtsh "cd '$T/work/api' && wt -a none feat-x"
+    [ "$status" -eq 0 ]
+    [ -d "$HOME/wt/api/feat-x" ]
+    [ ! -e "$FAKE_AGTERM_LOG" ]
+}
+
+@test "repos entry may point at a repo itself" {
+    make_repo "$T/elsewhere" warp
+    write_config "root = ~/wt" "repos = $T/work" "repos = $T/elsewhere/warp"
+    export FAKE_WS_NAME=warp
+    run wtsh 'wt -a none feat-x'
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$HOME/wt/warp/feat-x" rev-parse --git-common-dir)" = "$T/elsewhere/warp/.git" ]
+    run wtsh 'wtl'
+    [[ $output == *"warp"*"feat-x"* ]]
+    run wtsh 'wtrm warp feat-x'
+    [ "$status" -eq 0 ]
+    [ ! -e "$HOME/wt/warp" ]
 }
 
 # --- wtl и wtrm -----------------------------------------------------------
