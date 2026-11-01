@@ -37,7 +37,7 @@ outcome=error
 nquestions=0
 
 # След в журнале: время, агент, исход, секунды ожидания, число вопросов. Текст вопросов не пишется.
-# shellcheck disable=SC2329 # вызывается из cleanup
+# shellcheck disable=SC2317,SC2329 # вызывается из cleanup через trap EXIT
 trace() {
     local file=${AGTERM_ASK_LOG-${XDG_STATE_HOME:-$HOME/.local/state}/agterm-kit/ask.log}
     [[ -n $file && $outcome != help ]] || return 0
@@ -49,7 +49,7 @@ trace() {
 
 work=
 page_id=
-# shellcheck disable=SC2329 # вызывается из trap
+# shellcheck disable=SC2317,SC2329 # вызывается из trap EXIT
 cleanup() {
     [[ -n $work ]] && rm -rf "$work"
     trace
