@@ -4,6 +4,14 @@
 # Повторный запуск безопасен: готовый симлинк, существующие конфиги и прописанный хук не трогаются.
 set -euo pipefail
 
+gui=no
+case ${1:-} in
+    --gui) gui=yes; shift ;;
+    '') ;;
+    *) echo 'usage: install.sh [--gui]' >&2; exit 2 ;;
+esac
+[[ $# == 0 ]] || { echo 'usage: install.sh [--gui]' >&2; exit 2; }
+
 kit_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 config_home=${XDG_CONFIG_HOME:-$HOME/.config}
 link=$config_home/zsh/wt.zsh
@@ -211,3 +219,7 @@ for agents_md in "$codex_home/AGENTS.md" "$opencode_dir/AGENTS.md"; do
     managed_block "$agents_md" "инструкция ask_user" \
         '<!-- agterm-kit:ask begin -->' '<!-- agterm-kit:ask end -->' "$ask_rule"
 done
+
+if [[ $gui == yes ]]; then
+    python3 "$kit_dir/workflows/install.py" ${AGTERM_COOKBOOK_SOURCE:+--source "$AGTERM_COOKBOOK_SOURCE"}
+fi

@@ -3,10 +3,13 @@
 Обвязка для терминала [agterm](https://github.com/umputun/agterm): shell-функции и скрипты,
 которые опираются на его модель воркспейсов и сессий и на `agtermctl`.
 
-Внутри две утилиты:
+Внутри:
 
 - `wt`: git worktree для текущей репы или репы воркспейса agterm;
 - `ask`: вопросы агентов (Claude Code, Codex, OpenCode) с вариантами ответа в HTML-оверлее agterm.
+- [GUI и cookbook](workflows/README.md): проекты, задачи и worktree с Claude, рецензии
+  документов, dashboard, восстановление разговоров и компаньоны. Установка: `make install-gui`.
+  Панель задач: **Ctrl+Shift+W**, оформление в стиле JetBrains New UI Dark.
 
 ## wt
 

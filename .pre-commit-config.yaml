@@ -6,10 +6,10 @@ repos:
         entry: make lint
         language: system
         pass_filenames: false
-        files: '(\.(zsh|sh|bash)|^ask/agterm-ask(-mcp)?)$'
+        files: '(\.(zsh|sh|bash|py|html)|^ask/agterm-ask(-mcp)?|^wt/agterm-worktrees)$'
       - id: bats
         name: bats
         entry: make test
         language: system
         pass_filenames: false
-        files: '^(wt/|ask/|tests/|install\.sh$)'
+        files: '^(wt/|ask/|workflows/|tests/|install\.sh$)'

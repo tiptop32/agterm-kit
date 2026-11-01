@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install zsh, bats, shellcheck
-        run: sudo apt-get update && sudo apt-get install -y zsh bats shellcheck jq
+      - name: Install zsh, bats, shellcheck, Python
+        run: sudo apt-get update && sudo apt-get install -y zsh bats shellcheck jq python3
       - run: make lint
       - run: make test
