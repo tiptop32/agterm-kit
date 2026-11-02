@@ -76,6 +76,7 @@ push_to_origin() {
 setup_ask_env() {
     unset AGTERM_SOCKET AGTERM_ASK_CONFIG AGTERM_ASK_AGENT AGTERM_ASK_PROGRESS
     unset FAKE_OPEN_FAIL FAKE_OUTCOME FAKE_VALUE
+    unset FAKE_STALE_SESSION FAKE_TREE_JSON AGTERM_PANE_ID
     export AGTERM_WINDOW_ID=WIN-1 AGTERM_ASK_POLL=0.05 AGTERM_ASK_LOG=$T/ask.log TMPDIR=$T/tmp
     mkdir -p "$TMPDIR"
 
@@ -84,6 +85,9 @@ setup_ask_env() {
 echo "$*" >> "$FAKE_AGTERM_LOG"
 case "$1 $2 $3" in
 "session overlay open")
+    if [ -n "$FAKE_STALE_SESSION" ]; then
+        case " $* " in *" --target SESSION-1 "*) echo 'no such session: SESSION-1' >&2; exit 1 ;; esac
+    fi
     if [ -n "$FAKE_OPEN_FAIL" ]; then echo "Error: overlay already open" >&2; exit 1; fi
     while [ $# -gt 0 ]; do
         [ "$1" = --html ] && cp "$2" "$T/page.html"
@@ -96,7 +100,15 @@ case "$1 $2 $3" in
         '{result: {pageOutcome: ({pageID: "PAGE-1", outcome: $o} + (if $o == "submitted" then {value: $v} else {} end))}}'
     ;;
 "tree --json --window")
-    echo '{"result":{"tree":{"htmlOverlays":[{"id":"PAGE-1","state":"loaded","file":"x"}]}}}'
+    if [ -n "$FAKE_TREE_JSON" ]; then printf '%s\n' "$FAKE_TREE_JSON"; else
+        echo '{"result":{"tree":{"htmlOverlays":[{"id":"PAGE-1","state":"loaded","file":"x"}]}}}'
+    fi
+    ;;
+"tree --window WIN-2")
+    printf '%s\n' "$FAKE_TREE_JSON"
+    ;;
+"window list --json")
+    echo '{"result":{"windows":[{"id":"WIN-2","open":true}]}}'
     ;;
 esac
 EOF

@@ -1,4 +1,4 @@
-.PHONY: test lint hooks install install-gui eval eval-gui
+.PHONY: test lint hooks install install-gui install-themes eval eval-gui eval-themes
 
 test:
 	bats tests
@@ -6,9 +6,9 @@ test:
 lint:
 	zsh -n wt/wt.zsh
 	zsh -n wt/gui-bridge.zsh
-	shellcheck install.sh wt/agterm-worktrees ask/ask-hook.sh ask/agterm-ask ask/agterm-ask-mcp evals/ask-agents.sh
+	shellcheck install.sh wt/agterm-worktrees ask/ask-hook.sh ask/agterm-ask ask/agterm-ask-mcp evals/ask-agents.sh evals/ask-session.sh
 	shellcheck -s bash tests/helpers.bash
-	python3 -c 'import ast,pathlib; [ast.parse(p.read_text(),filename=str(p)) for root in ("wt", "workflows", "evals") for p in pathlib.Path(root).glob("*.py")]'
+	python3 -c 'import ast,pathlib; [ast.parse(p.read_text(),filename=str(p)) for root in ("wt", "workflows", "ask", "themes", "evals") for p in pathlib.Path(root).rglob("*.py")]'
 
 hooks:
 	pre-commit install
@@ -18,6 +18,12 @@ install:
 
 install-gui:
 	./install.sh --gui
+
+install-themes:
+	python3 themes/rex.py install
+
+eval-themes:
+	python3 themes/eval.py
 
 # Платный eval на настоящих Codex и OpenCode, нужен запущенный agterm.
 eval:

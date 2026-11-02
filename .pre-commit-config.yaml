@@ -12,4 +12,4 @@ repos:
         entry: make test
         language: system
         pass_filenames: false
-        files: '^(wt/|ask/|workflows/|tests/|install\.sh$)'
+        files: '^(wt/|ask/|workflows/|themes/|tests/|install\.sh$)'

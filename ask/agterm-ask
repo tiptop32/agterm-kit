@@ -198,7 +198,20 @@ open_args=(session overlay open --html "$page" --js --target "$AGTERM_SESSION_ID
 ((size > 0 && size < 100)) && open_args+=(--size-percent "$size")
 [[ $follow == yes ]] && open_args+=(--follow)
 
-reply=$(ctl "${open_args[@]}" 2>&1) || finish unavailable "оверлей не открылся: $reply"
+if ! reply=$(ctl "${open_args[@]}" 2>&1); then
+    if [[ $reply == *"no such session:"* ]]; then
+        resolved=$(python3 "$kit_dir/resolve-session.py" 2>&1) || finish unavailable "$resolved"
+        read -r AGTERM_WINDOW_ID AGTERM_SESSION_ID <<<"$resolved"
+        log "привязка восстановлена: $AGTERM_SESSION_ID"
+        # В массиве остался прежний --target. Повторный аргумент не добавляем.
+        open_args=(session overlay open --html "$page" --js --target "$AGTERM_SESSION_ID" --json)
+        ((size > 0 && size < 100)) && open_args+=(--size-percent "$size")
+        [[ $follow == yes ]] && open_args+=(--follow)
+        reply=$(ctl "${open_args[@]}" 2>&1) || finish unavailable "оверлей не открылся: $reply"
+    else
+        finish unavailable "оверлей не открылся: $reply"
+    fi
+fi
 page_id=$(jq -r '.result.pageID // empty' <<<"$reply" 2>/dev/null)
 [[ -n $page_id ]] || finish unavailable "agtermctl не вернул pageID: $reply"
 

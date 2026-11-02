@@ -16,6 +16,33 @@ questions() {
     jq -n -c '{questions: [{question: "Куда?", options: [{label: "Влево"}, {label: "Вправо"}]}]}'
 }
 
+@test "stale session recovers by cwd and refuses ambiguous or absent matches" {
+    export FAKE_STALE_SESSION=1 FAKE_VALUE='{"answers":{"Q?":"B"}}'
+    cd "$HOME"
+    for count in 0 1 2; do
+        export FAKE_TREE_JSON
+        FAKE_TREE_JSON=$(jq -nc --arg cwd "$HOME" --argjson n "$count" \
+            '{result:{tree:{workspaces:[{sessions:[range($n) | {id:("NEW-" + tostring),cwd:$cwd}]}]}}}')
+        run --separate-stderr "$ASK" 'Q?' A B
+        if [ "$count" -eq 1 ]; then
+            [ "$status" -eq 0 ]
+            [ "$output" = B ]
+            grep -q -- '--target NEW-0' "$FAKE_AGTERM_LOG"
+        else
+            [ "$status" -eq 3 ]
+        fi
+    done
+}
+
+@test "stale session follows stable pane even after the directory changes" {
+    export FAKE_STALE_SESSION=1 AGTERM_PANE_ID=PANE-1 FAKE_VALUE='{"answers":{"Q?":"B"}}'
+    export FAKE_TREE_JSON='{"result":{"tree":{"workspaces":[{"sessions":[{"id":"NEW-PANE","cwd":"/elsewhere","surfaces":[{"paneID":"pane-1"}]}]}]}}}'
+    run --separate-stderr "$ASK" 'Q?' A B
+    [ "$status" -eq 0 ]
+    [ "$output" = B ]
+    grep -q -- '--target NEW-PANE' "$FAKE_AGTERM_LOG"
+}
+
 @test "json mode prints answers for the questions on stdin" {
     export FAKE_VALUE='{"answers":{"Куда?":"Вправо"}}'
     run --separate-stderr "$ASK" < <(questions)
