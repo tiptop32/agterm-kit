@@ -6,7 +6,8 @@ const statusScript = fileURLToPath(new URL("./agterm-status.sh", import.meta.url
 export default function (pi: ExtensionAPI) {
 	const setStatus = async (...args: string[]) => {
 		try {
-			await pi.exec(statusScript, args);
+			// Статус советный: зависший адаптер не должен задерживать ход агента.
+			await pi.exec(statusScript, args, { timeout: 1_000 });
 		} catch {
 			// Статус agterm не должен прерывать работу агента.
 		}

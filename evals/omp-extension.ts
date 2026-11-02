@@ -8,7 +8,8 @@ extension({
 	on(event: string, handler: Handler) {
 		handlers.set(event, handler);
 	},
-	async exec(command: string, args: string[]) {
+	async exec(command: string, args: string[], options?: { timeout?: number }) {
+		if (!options?.timeout || options.timeout > 2_000) throw new Error("status exec must have a short timeout");
 		calls.push([command, ...args]);
 		throw new Error("simulated status adapter failure");
 	},
