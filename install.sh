@@ -205,6 +205,29 @@ if [[ -d $opencode_dir ]]; then
     fi
 fi
 
+# omp: MCP-сервер рядом с пользовательским config.yml. mcp.json из omp-setup обычно
+# является симлинком: его владельца не меняем, а печатаем готовый фрагмент.
+omp_dir=$HOME/.omp/agent
+if [[ -d $omp_dir ]]; then
+    omp_mcp=$omp_dir/mcp.json
+    omp_fragment=$(jq -n --arg cmd "$mcp" '{mcpServers: {"agterm-ask": {
+        type: "stdio", command: $cmd, timeout: 3600000
+    }}}')
+    if [[ -L $omp_mcp ]]; then
+        echo "симлинк $omp_mcp не трогаю; добавьте в файл omp-setup:"
+        printf '%s\n' "$omp_fragment"
+    else
+        # shellcheck disable=SC2016 # $cmd раскрывает jq
+        update_json "$omp_mcp" "MCP-сервер agterm-ask для omp" '
+            .mcpServers["agterm-ask"] as $old
+            | if $old.command == $cmd and $old.type == "stdio" and $old.timeout == 3600000 then .
+              else .mcpServers["agterm-ask"] = ({type: "stdio", command: $cmd, timeout: 3600000}
+                + if ($old.enabled | type) == "boolean" then {enabled: $old.enabled} else {} end)
+              end
+        ' --arg cmd "$mcp"
+    fi
+fi
+
 # Инструкция агенту в глобальном AGENTS.md. Описания инструмента Codex не хватает:
 # без инструкции он видит ask_user, но спрашивает текстом в чате (evals/ask-agents.sh).
 # shellcheck disable=SC2016 # обратные кавычки здесь markdown, а не подстановка

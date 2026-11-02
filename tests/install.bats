@@ -216,3 +216,36 @@ setup() {
     [[ $output == *"opencode.jsonc прописан вручную, не трогаю"* ]]
     [ ! -e "$XDG_CONFIG_HOME/opencode/opencode.json" ]
 }
+
+@test "ask: omp gets the mcp server and keeps other entries" {
+    mkdir -p "$HOME/.omp/agent"
+    echo '{"mcpServers":{"other":{"type":"stdio","command":"x"},"agterm-ask":{"enabled":false,"command":"/old"}}}' \
+        > "$HOME/.omp/agent/mcp.json"
+
+    run "$KIT_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    jq -e --arg cmd "$KIT_DIR/ask/agterm-ask-mcp" '
+        .mcpServers.other == {type: "stdio", command: "x"}
+        and .mcpServers["agterm-ask"] == {
+            type: "stdio", command: $cmd, timeout: 3600000, enabled: false
+        }' "$HOME/.omp/agent/mcp.json"
+
+    cp "$HOME/.omp/agent/mcp.json" "$T/mcp.first"
+    "$KIT_DIR/install.sh" >/dev/null
+    cmp "$T/mcp.first" "$HOME/.omp/agent/mcp.json"
+}
+
+@test "ask: symlinked omp mcp config is not changed" {
+    mkdir -p "$HOME/.omp/agent" "$T/omp-setup"
+    echo '{"mcpServers":{"owner":{"command":"mine"}}}' > "$T/omp-setup/mcp.json"
+    ln -s "$T/omp-setup/mcp.json" "$HOME/.omp/agent/mcp.json"
+    cp "$T/omp-setup/mcp.json" "$T/mcp.before"
+
+    run "$KIT_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ -L "$HOME/.omp/agent/mcp.json" ]
+    cmp "$T/mcp.before" "$T/omp-setup/mcp.json"
+    [[ $output == *"симлинк $HOME/.omp/agent/mcp.json не трогаю"* ]]
+    [[ $output == *'"agterm-ask"'* ]]
+    [[ $output == *'"timeout": 3600000'* ]]
+}

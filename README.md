@@ -135,6 +135,7 @@ repos = ~/warp       # можно указать и сам клон
 | Claude Code | PreToolUse-хук `ask/ask-hook.sh` на `AskUserQuestion` | ничего нового: зовёт свой `AskUserQuestion`, хук возвращает ответ через `updatedInput.answers` ([документация](https://code.claude.com/docs/en/hooks#askuserquestion)) |
 | Codex | MCP-сервер `ask/agterm-ask-mcp` с инструментом `ask_user` и правило в `~/.codex/AGENTS.md` | вызывает `ask_user` вместо вопроса в чате |
 | OpenCode | тот же MCP-сервер и правило в `~/.config/opencode/AGENTS.md` | так же |
+| omp | тот же MCP-сервер в `~/.omp/agent/mcp.json` | вызывает `ask_user` вместо вопроса в чате |
 | скрипт, любой другой агент | CLI `ask/agterm-ask` | `agterm-ask "Вопрос?" "Да" "Нет"` печатает выбранный вариант |
 
 Почему для Codex и OpenCode MCP, а не хук: их хуки не умеют подставить ответ за инструмент
@@ -181,6 +182,9 @@ repos = ~/warp       # можно указать и сам клон
   OpenCode сливает `opencode.json` и `opencode.jsonc` из одного каталога, поэтому сервер
   ложится в `opencode.json` рядом. Если `agterm-ask` уже прописан в `.jsonc` вручную, установка
   его не дублирует;
+- **omp**, если есть `~/.omp/agent`: добавляет сервер в `mcp.json` и сохраняет выставленный
+  вручную флаг `enabled`. Таймаут инструмента — 3600 секунд. Если `mcp.json` — симлинк,
+  которым управляет `omp-setup`, установщик не меняет его и печатает готовый JSON-фрагмент;
 - **правило для Codex и OpenCode** в их глобальный `AGENTS.md`, между строками
   `<!-- agterm-kit:ask begin -->` и `<!-- agterm-kit:ask end -->`: просить выбор через
   `ask_user`, а не текстом. Одного описания инструмента не хватает: без правила Codex видит
@@ -194,6 +198,22 @@ JSON-конфиги меняются атомарно: новая версия �
 Хук и сервер указывают на скрипты в клоне репозитория, так что после `git pull` новая версия
 работает сразу. Правку `settings.json` Claude Code замечает сам. Codex и OpenCode читают
 MCP-серверы при старте: уже запущенные сессии увидят `ask_user` после перезапуска.
+
+## Статус omp в agterm
+
+Расширение `omp/agterm-status.ts` обновляет статус сессии в сайдбаре agterm. При событиях
+`agent_start` и `turn_start` оно ставит `active --blink`, при `agent_end` — `completed`.
+Вызов проходит через `omp/agterm-status.sh`: без `AGTERM_ENABLED=1` скрипт ничего не делает,
+а ошибка адаптера статуса не прерывает omp.
+
+Установка использует `HOME` из окружения и не меняет конфиг, которым владеет `omp-setup`:
+
+```sh
+./omp/install.sh
+```
+
+Скрипт создаёт симлинки в `~/.omp/agent/extensions/`: omp сам подхватывает этот каталог,
+поэтому `config.yml` правка не нужна. Повторный запуск не создаёт дубли.
 
 ### Конфиг
 
