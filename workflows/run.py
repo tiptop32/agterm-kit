@@ -41,12 +41,36 @@ def config() -> dict:
     return result
 
 
+def asks_user(stop_payload: str) -> bool:
+    """Ход Claude закончился вопросом пользователю: работа не кончилась.
+
+    Последняя непустая строка `last_assistant_message` из Stop hook, без markdown
+    и кавычек в конце, оканчивается на «?». Агент снимает контекст и после
+    промежуточного пункта, а затем спрашивает, браться ли за следующий.
+    """
+    try:
+        payload = json.loads(stop_payload)
+    except ValueError:
+        return False
+    message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
+    lines = [line for line in str(message or "").splitlines() if line.strip()]
+    return bool(lines) and lines[-1].rstrip(" \t*_`'\"»)").endswith("?")
+
+
 def main() -> int:
     action = sys.argv[1] if len(sys.argv) == 2 else ""
     if action in ("project", "worktrees"):
         os.execv(sys.executable, [sys.executable, str(HERE.parent / "wt/gui.py"), action])
     if action not in RECIPES:
         raise ValueError("Неизвестное действие")
+    if action == "finish-offer" and asks_user(sys.stdin.read()):
+        # Тот же маркер, что взводит `end-of-task-offer.sh arm`: без него следующий
+        # конец хода снова показал бы попап за уже пройденный пункт.
+        pane = os.environ.get("AGTERM_PANE_ID", "")
+        if pane:
+            marker = Path(os.environ.get("TMPDIR") or "/tmp") / "agterm-end-of-task" / pane
+            marker.unlink(missing_ok=True)
+        return 0
     cfg = config()
     root = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "agterm-kit/cookbook" / LOCK["commit"]
     relative, args = RECIPES[action]

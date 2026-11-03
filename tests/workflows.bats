@@ -84,6 +84,28 @@ PY
     grep -q 'ask open finished --default continue --target SESSION-1 --style gui' "$FAKE_AGTERM_LOG"
 }
 
+# Живой случай 2026-11-03: агент снял контекст после промежуточного пункта и закончил ход
+# вопросом «Браться?», а попап «Task finished» предложил закрыть сессию посреди работы.
+@test "finish offer stays quiet when the turn ends with a question to the user" {
+    export AGTERM_PANE_ID=PANE-1 TMPDIR=$T/tmp
+    marker=$T/tmp/agterm-end-of-task/PANE-1
+    mkdir -p "$(dirname "$marker")" && touch "$marker"
+    run python3 "$KIT_DIR/workflows/run.py" finish-offer <<<'{"last_assistant_message":"Пункт 2 готов.\n\nБраться за п. 3?**\n"}'
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+    [ ! -s "${FAKE_AGTERM_LOG:-/nonexistent}" ] || ! grep -q 'ask open' "$FAKE_AGTERM_LOG"
+}
+
+@test "finish offer still runs when the turn ends with a statement" {
+    export AGTERM_PANE_ID=PANE-1 TMPDIR=$T/tmp XDG_DATA_HOME=$T/no-cookbook
+    marker=$T/tmp/agterm-end-of-task/PANE-1
+    mkdir -p "$(dirname "$marker")" && touch "$marker"
+    # Без cookbook скрипт оффера не запускается: маркер остаётся, значит обёртка его не тронула.
+    run python3 "$KIT_DIR/workflows/run.py" finish-offer <<<'{"last_assistant_message":"Готово, всё влито в main."}'
+    [ "$status" -eq 0 ]
+    [ -e "$marker" ]
+}
+
 @test "gui install preserves settings when a later destination cannot be written" {
     prepare_workflows
     mkdir -p "$XDG_CONFIG_HOME/agterm" "$HOME/.claude"
