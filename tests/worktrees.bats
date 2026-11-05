@@ -5,7 +5,7 @@ load helpers
 setup() {
     setup_env
     make_repo "$T/projects with space" api
-    write_config 'root = ~/wt' "repos = $T/projects with space"
+    write_config "repos = $T/projects with space"
     export AGT_SESSION_ID=SESSION-1 AGT_WINDOW_ID=WIN-1 AGTERM_GUI_LOG=$T/gui.jsonl
     cat > "$T/bin/agtermctl" <<'EOF'
 #!/bin/sh
@@ -33,10 +33,10 @@ create_task() {
 @test "GUI creates a worktree and binds Claude Opus to a new session in the invoking window" {
     run create_task
     [ "$status" -eq 0 ]
-    [ "$(git -C "$HOME/wt/api/feat-x" branch --show-current)" = feat-x ]
+    [ "$(git -C "$T/projects with space/worktrees/api/feat-x" branch --show-current)" = feat-x ]
     grep -q 'session new .*--window WIN-1 .*claude --model opus' "$FAKE_AGTERM_LOG"
     ! grep -q 'session type\|session rename' "$FAKE_AGTERM_LOG"
-    run git -C "$HOME/wt/api/feat-x" rev-parse --abbrev-ref '@{upstream}'
+    run git -C "$T/projects with space/worktrees/api/feat-x" rev-parse --abbrev-ref '@{upstream}'
     [ "$status" -ne 0 ]
     jq -e 'select(.action=="create" and .outcome=="success")' "$T/gui.jsonl"
 }
@@ -46,11 +46,11 @@ create_task() {
         run create_task "$branch"
         [ "$status" -eq 1 ]
     done
-    mkdir -p "$HOME/wt/api/feat-x"
-    echo keep > "$HOME/wt/api/feat-x/valuable.txt"
+    mkdir -p "$T/projects with space/worktrees/api/feat-x"
+    echo keep > "$T/projects with space/worktrees/api/feat-x/valuable.txt"
     run create_task
     [ "$status" -eq 1 ]
-    [ "$(cat "$HOME/wt/api/feat-x/valuable.txt")" = keep ]
+    [ "$(cat "$T/projects with space/worktrees/api/feat-x/valuable.txt")" = keep ]
     [ ! -e "$FAKE_AGTERM_LOG" ]
 }
 
@@ -59,45 +59,65 @@ create_task() {
     run create_task
     [ "$status" -eq 1 ]
     [[ $output == *"Worktree сохранён"* ]]
-    [ -d "$HOME/wt/api/feat-x" ]
+    [ -d "$T/projects with space/worktrees/api/feat-x" ]
     unset FAKE_OPEN_FAIL
     run create_task
     [ "$status" -eq 0 ]
 }
 
 delete_task() {
-    request "$(jq -n --arg repo "$T/projects with space/api" --arg path "$HOME/wt/api/feat-x" --arg confirm "${1:-feat-x}" '{action:"delete",repo:$repo,path:$path,confirmation:$confirm}')"
+    request "$(jq -n --arg repo "$T/projects with space/api" --arg path "$T/projects with space/worktrees/api/feat-x" --arg confirm "${1:-feat-x}" '{action:"delete",repo:$repo,path:$path,confirmation:$confirm}')"
 }
 
 @test "GUI deletion requires exact confirmation and refuses dirty or open worktrees" {
     create_task >/dev/null
     run delete_task wrong
     [ "$status" -eq 1 ]
-    echo valuable > "$HOME/wt/api/feat-x/work.txt"
+    echo valuable > "$T/projects with space/worktrees/api/feat-x/work.txt"
     run delete_task
     [ "$status" -eq 1 ]
-    [ -f "$HOME/wt/api/feat-x/work.txt" ]
-    rm "$HOME/wt/api/feat-x/work.txt"
-    export FAKE_CWD=$HOME/wt/api/feat-x/subdir
+    [ -f "$T/projects with space/worktrees/api/feat-x/work.txt" ]
+    rm "$T/projects with space/worktrees/api/feat-x/work.txt"
+    export FAKE_CWD="$T/projects with space/worktrees/api/feat-x/subdir"
     run delete_task
     [ "$status" -eq 1 ]
     [[ $output == *"открыта сессия"* ]]
-    [ -d "$HOME/wt/api/feat-x" ]
+    [ -d "$T/projects with space/worktrees/api/feat-x" ]
 }
 
 @test "GUI refuses local commits and removes a clean saved worktree while retaining its branch" {
     create_task >/dev/null
-    echo work > "$HOME/wt/api/feat-x/work.txt"
-    git -C "$HOME/wt/api/feat-x" add work.txt
-    git -C "$HOME/wt/api/feat-x" commit -qm work
+    echo work > "$T/projects with space/worktrees/api/feat-x/work.txt"
+    git -C "$T/projects with space/worktrees/api/feat-x" add work.txt
+    git -C "$T/projects with space/worktrees/api/feat-x" commit -qm work
     run delete_task
     [ "$status" -eq 1 ]
     [[ $output == *"не сохранён в origin"* ]]
-    git -C "$HOME/wt/api/feat-x" push -q origin feat-x
+    git -C "$T/projects with space/worktrees/api/feat-x" push -q origin feat-x
     run delete_task
     [ "$status" -eq 0 ]
-    [ ! -d "$HOME/wt/api/feat-x" ]
+    [ ! -d "$T/projects with space/worktrees/api/feat-x" ]
     git -C "$T/projects with space/api" show-ref --verify refs/heads/feat-x
+}
+
+@test "GUI creates worktrees for same-named repos from different dirs next to each clone" {
+    make_repo "$T/second" api
+    write_config "repos = $T/projects with space" "repos = $T/second"
+    run create_task
+    [ "$status" -eq 0 ]
+    run request "$(jq -n --arg repo "$T/second/api" '{action:"create",repo:$repo,branch:"feat-x"}')"
+    [ "$status" -eq 0 ]
+    [ "$(git -C "$T/projects with space/worktrees/api/feat-x" rev-parse --git-common-dir)" = "$T/projects with space/api/.git" ]
+    [ "$(git -C "$T/second/worktrees/api/feat-x" rev-parse --git-common-dir)" = "$T/second/api/.git" ]
+}
+
+@test "GUI refuses to delete a worktree outside the repo worktrees dir" {
+    git -C "$T/projects with space/api" worktree add -q -b feat-y "$T/manual/feat-y"
+    git -C "$T/manual/feat-y" push -q origin feat-y
+    run request "$(jq -n --arg repo "$T/projects with space/api" --arg path "$T/manual/feat-y" '{action:"delete",repo:$repo,path:$path,confirmation:"feat-y"}')"
+    [ "$status" -eq 1 ]
+    [[ $output == *"вне каталога worktrees"* ]]
+    [ -d "$T/manual/feat-y" ]
 }
 
 @test "GUI reports successful creation even when the trace destination is unavailable" {
@@ -106,7 +126,7 @@ delete_task() {
     run create_task
     [ "$status" -eq 0 ]
     [[ $output == *"не записать журнал"* ]]
-    [ -d "$HOME/wt/api/feat-x" ]
+    [ -d "$T/projects with space/worktrees/api/feat-x" ]
     grep -q 'session new' "$FAKE_AGTERM_LOG"
 }
 
@@ -118,12 +138,12 @@ delete_task() {
     git -C "$T/projects with space/api" push -q origin main
     echo '{}' > "$T/projects with space/api/.claude/settings.local.json"
     create_task >/dev/null
-    echo irreplaceable > "$HOME/wt/api/feat-x/private.data"
+    echo irreplaceable > "$T/projects with space/worktrees/api/feat-x/private.data"
     run delete_task
     [ "$status" -eq 1 ]
     [[ $output == *"игнорируемые данные"* ]]
-    [ -f "$HOME/wt/api/feat-x/private.data" ]
-    rm "$HOME/wt/api/feat-x/private.data"
+    [ -f "$T/projects with space/worktrees/api/feat-x/private.data" ]
+    rm "$T/projects with space/worktrees/api/feat-x/private.data"
     run delete_task
     [ "$status" -eq 0 ]
     [ -d "$T/projects with space/api/.venv" ]
@@ -150,7 +170,7 @@ class Page(HTMLParser):
     def handle_data(self,data):
         if self.in_data: self.payload+=data
 page=Page()
-page.feed(gui.render({'projects':[{'name':label,'path':'/repo','worktrees':[]}],'root':'/wt'}))
+page.feed(gui.render({'projects':[{'name':label,'path':'/repo','worktrees':[]}]}))
 assert 'img' not in page.tags
 assert json.loads(page.payload)['projects'][0]['name']==label
 PY

@@ -8,8 +8,8 @@ case ${1:-} in
         roots=$(printf '%s\0' "${_wt_repo_dirs[@]}" | jq -Rs 'split("\u0000")[:-1]')
         rows=$(_wt_repos)
         # Последний отсутствующий каталог не превращает полезный список в ошибку.
-        printf '%s\n' "$rows" | jq -Rs --arg root "$_wt_root" --argjson roots "$roots" '
-            {root: $root, roots: $roots, repos: [split("\n")[] | select(length > 0)
+        printf '%s\n' "$rows" | jq -Rs --argjson roots "$roots" '
+            {roots: $roots, repos: [split("\n")[] | select(length > 0)
              | split("\t") | {name: .[0], path: .[1]}] | unique_by(.path)}'
         ;;
     create)

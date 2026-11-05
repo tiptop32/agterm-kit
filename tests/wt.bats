@@ -9,23 +9,22 @@ setup() {
     make_repo "$T/personal" blog
     write_config \
         "# комментарий" \
-        "root = ~/wt   # хвостовой комментарий" \
+        "repos = ~/../work   # хвостовой комментарий" \
         "" \
-        "repos = ~/../work" \
         "repos = $T/personal/"
     # ~/../work — это $T/work: проверяем раскрытие ~ в repos.
 }
 
 # --- конфиг ---------------------------------------------------------------
 
-@test "wt finds repo in second repos dir and puts worktree under root" {
+@test "wt finds repo in second repos dir and puts worktree next to it" {
     export FAKE_WS_NAME=blog
     run wtsh 'wt feat-x && print -r -- "PWD=$PWD"'
     [ "$status" -eq 0 ]
-    [[ $output == *"PWD=$HOME/wt/blog/feat-x"* ]]
-    [ "$(git -C "$HOME/wt/blog/feat-x" branch --show-current)" = feat-x ]
+    [[ $output == *"PWD=$T/personal/worktrees/blog/feat-x"* ]]
+    [ "$(git -C "$T/personal/worktrees/blog/feat-x" branch --show-current)" = feat-x ]
     # Агент запущен внутри нового worktree.
-    [ "$(cat "$T/agent.log")" = "$HOME/wt/blog/feat-x" ]
+    [ "$(cat "$T/agent.log")" = "$T/personal/worktrees/blog/feat-x" ]
 }
 
 @test "missing config: wt names its path, wt -h still works" {
@@ -36,36 +35,86 @@ setup() {
     [[ $output == *"нет конфига $XDG_CONFIG_HOME/agterm-kit/wt.conf"* ]]
     run wtsh 'wt -h'
     [ "$status" -eq 0 ]
-    [[ $output == *"(не задан)"* ]]
+    [[ $output == *"(не заданы)"* ]]
 }
 
 @test "unknown key and line without = fail with line number" {
-    write_config "root = ~/wt" "repo = ~/x"
+    write_config "repos = ~/x" "repo = ~/x"
     run wtsh 'wt feat-x'
     [ "$status" -eq 1 ]
     [[ $output == *"wt.conf:2: неизвестный ключ «repo»"* ]]
 
-    write_config "root ~/wt"
+    write_config "repos ~/x"
     run wtsh 'wt feat-x'
     [ "$status" -eq 1 ]
     [[ $output == *"wt.conf:1: ожидается строка вида «ключ = значение»"* ]]
 }
 
 @test "config without repos is rejected" {
-    write_config "root = ~/wt"
+    write_config "# только комментарий"
     run wtsh 'wt feat-x'
     [ "$status" -eq 1 ]
-    [[ $output == *"нужны ключи root и repos"* ]]
+    [[ $output == *"нужен ключ repos"* ]]
 }
 
-@test "WT_ROOT and WT_REPOS override config" {
+@test "WT_REPOS overrides config" {
     make_repo "$T/other" api
-    export FAKE_WS_NAME=api WT_ROOT=$T/alt-root WT_REPOS="$T/nowhere:$T/other"
+    export FAKE_WS_NAME=api WT_REPOS="$T/nowhere:$T/other"
     run wtsh 'wt -a none feat-x'
     [ "$status" -eq 0 ]
-    [ -d "$T/alt-root/api/feat-x" ]
-    # Worktree принадлежит репе из WT_REPOS, а не из конфига.
-    [ "$(git -C "$T/alt-root/api/feat-x" rev-parse --git-common-dir)" = "$T/other/api/.git" ]
+    # Worktree принадлежит репе из WT_REPOS, а не из конфига, и лежит рядом с ней.
+    [ "$(git -C "$T/other/worktrees/api/feat-x" rev-parse --git-common-dir)" = "$T/other/api/.git" ]
+    [ ! -e "$T/work/worktrees" ]
+}
+
+@test "legacy root key and WT_ROOT warn but do not move worktrees there" {
+    write_config "root = ~/wt" "repos = $T/work"
+    export FAKE_WS_NAME=api WT_ROOT=$T/alt-root
+    run wtsh 'wt -a none feat-x'
+    [ "$status" -eq 0 ]
+    [[ $output == *"wt.conf:1: ключ root устарел"* ]]
+    [[ $output == *"WT_ROOT устарела"* ]]
+    [ -d "$T/work/worktrees/api/feat-x" ]
+    [ ! -e "$HOME/wt" ] && [ ! -e "$T/alt-root" ]
+}
+
+@test "same-named clones in different parents get separate worktrees dirs" {
+    make_repo "$T/other" api
+    run wtsh "cd '$T/work/api' && wt -a none feat-x"
+    [ "$status" -eq 0 ]
+    run wtsh "cd '$T/other/api' && wt -a none feat-x"
+    [ "$status" -eq 0 ]
+    # Общий root свёл бы обе в <root>/api/feat-x, и вторая только перешла бы в первую.
+    [[ $output != *"уже существует"* ]]
+    [ "$(git -C "$T/work/worktrees/api/feat-x" rev-parse --git-common-dir)" = "$T/work/api/.git" ]
+    [ "$(git -C "$T/other/worktrees/api/feat-x" rev-parse --git-common-dir)" = "$T/other/api/.git" ]
+}
+
+@test "worktrees dir is not listed as a repo" {
+    export FAKE_WS_NAME=api
+    wtsh 'wt -a none feat-x' >/dev/null
+    [ -d "$T/work/worktrees/api/feat-x" ]
+    run wtsh '_wt_load_config && _wt_repos'
+    [ "$status" -eq 0 ]
+    [[ $output != *worktrees* ]]
+}
+
+@test "symlinked clone resolves to the real clone location" {
+    make_repo "$T/elsewhere" warp
+    ln -s "$T/elsewhere/warp" "$T/clone-link"
+    write_config "repos = $T/clone-link"
+    export FAKE_WS_NAME=clone-link
+    run wtsh 'wt -a none feat-x'
+    [ "$status" -eq 0 ]
+    # Через воркспейс клон приходит путём из конфига, через cwd — путём от git.
+    # Место одно и то же: рядом с настоящим клоном, и wt из cwd находит готовый worktree.
+    [ -d "$T/elsewhere/worktrees/warp/feat-x" ]
+    [ ! -e "$T/worktrees" ]
+    run wtsh "cd '$T/clone-link' && wt -a none feat-x"
+    [[ $output == *"уже существует, перехожу"* ]]
+    run wtsh 'wtrm clone-link feat-x'
+    [ "$status" -eq 0 ]
+    [ ! -e "$T/elsewhere/worktrees" ]
 }
 
 @test "same-named repo is taken from first repos dir" {
@@ -73,7 +122,7 @@ setup() {
     export FAKE_WS_NAME=api
     run wtsh 'wt -a none feat-x'
     [ "$status" -eq 0 ]
-    [ "$(git -C "$HOME/wt/api/feat-x" rev-parse --git-common-dir)" = "$T/work/api/.git" ]
+    [ "$(git -C "$T/work/worktrees/api/feat-x" rev-parse --git-common-dir)" = "$T/work/api/.git" ]
 }
 
 @test "workspace without matching repo fails" {
@@ -81,7 +130,7 @@ setup() {
     run wtsh 'wt feat-x'
     [ "$status" -eq 1 ]
     [[ $output == *"воркспейс 'missing' не соответствует репе"* ]]
-    [ ! -e "$HOME/wt/missing" ]
+    [ ! -e "$T/work/worktrees" ] && [ ! -e "$T/personal/worktrees" ]
 }
 
 # --- создание worktree ----------------------------------------------------
@@ -91,7 +140,7 @@ setup() {
     export FAKE_WS_NAME=api
     run wtsh 'wt -a none feat-x'
     [ "$status" -eq 0 ]
-    wt=$HOME/wt/api/feat-x
+    wt=$T/work/worktrees/api/feat-x
     [ -f "$wt/fresh.txt" ]
     run git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
     [ "$status" -ne 0 ]
@@ -107,7 +156,7 @@ setup() {
     export FAKE_WS_NAME=api
     run wtsh 'wt -a none feat-x'
     [ "$status" -eq 0 ]
-    [ -f "$HOME/wt/api/feat-x/fresh.txt" ]
+    [ -f "$T/work/worktrees/api/feat-x/fresh.txt" ]
     [ "$(git -C "$T/work/api" rev-parse main)" = "$(git -C "$T/work/api" rev-parse origin/main)" ]
     # Основной клон остался на своей ветке с незакоммиченной правкой.
     [ "$(git -C "$T/work/api" branch --show-current)" = my-work ]
@@ -123,11 +172,11 @@ setup() {
     run wtsh 'wt -a none feat-x'
     [ "$status" -eq 0 ]
     [[ $output == *"wt: беру origin/main"* ]]
-    [ -f "$HOME/wt/api/feat-x/remote.txt" ]
-    [ ! -f "$HOME/wt/api/feat-x/local.txt" ]
+    [ -f "$T/work/worktrees/api/feat-x/remote.txt" ]
+    [ ! -f "$T/work/worktrees/api/feat-x/local.txt" ]
     # От origin/main git без --no-track прописал бы upstream=origin/main,
     # и git push из фичи пошёл бы прямо в main.
-    run git -C "$HOME/wt/api/feat-x" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
+    run git -C "$T/work/worktrees/api/feat-x" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
     [ "$status" -ne 0 ]
 }
 
@@ -137,7 +186,7 @@ setup() {
     run wtsh 'wt feat-x && print -r -- "PWD=$PWD"'
     [ "$status" -eq 0 ]
     [[ $output == *"уже существует, перехожу"* ]]
-    [[ $output == *"PWD=$HOME/wt/api/feat-x"* ]]
+    [[ $output == *"PWD=$T/work/worktrees/api/feat-x"* ]]
     [ ! -e "$T/agent.log" ]
 }
 
@@ -147,7 +196,7 @@ setup() {
     export FAKE_WS_NAME=api
     run wtsh 'wt -a none feat-x'
     [ "$status" -eq 0 ]
-    wt=$HOME/wt/api/feat-x
+    wt=$T/work/worktrees/api/feat-x
     [ "$(readlink "$wt/.venv")" = "$T/work/api/.venv" ]
     [ "$(readlink "$wt/node_modules")" = "$T/work/api/node_modules" ]
     [ -f "$wt/.claude/settings.local.json" ] && [ ! -L "$wt/.claude/settings.local.json" ]
@@ -164,7 +213,7 @@ setup() {
     export FAKE_WS_NAME=api WT_NEW_SESSION=1
     run wtsh 'wt feat-x'
     [ "$status" -eq 0 ]
-    grep -q "^session new --cwd $HOME/wt/api/feat-x --name feat-x --command zsh -lc" "$FAKE_AGTERM_LOG"
+    grep -q "^session new --cwd $T/work/worktrees/api/feat-x --name feat-x --command zsh -lc" "$FAKE_AGTERM_LOG"
     [ ! -e "$T/agent.log" ]
 }
 
@@ -177,7 +226,7 @@ setup() {
     run wtsh 'wt -a vim feat-y'
     [ "$status" -eq 2 ]
     [[ $output == *"неизвестный агент 'vim'"* ]]
-    [ ! -e "$HOME/wt/api/feat-y" ]
+    [ ! -e "$T/work/worktrees/api/feat-y" ]
 }
 
 @test "wt refuses outside git repo and outside agterm" {
@@ -196,40 +245,40 @@ setup() {
     mkdir -p "$T/elsewhere/warp/sub"
     run wtsh "cd '$T/elsewhere/warp/sub' && wt -a none feat-x"
     [ "$status" -eq 0 ]
-    [ "$(git -C "$HOME/wt/warp/feat-x" rev-parse --git-common-dir)" = "$T/elsewhere/warp/.git" ]
-    [ ! -e "$HOME/wt/api" ]
+    [ "$(git -C "$T/elsewhere/worktrees/warp/feat-x" rev-parse --git-common-dir)" = "$T/elsewhere/warp/.git" ]
+    [ ! -e "$T/work/worktrees/api" ]
 }
 
 @test "wt inside a worktree makes a sibling from the main clone" {
     export FAKE_WS_NAME=blog
     wtsh 'wt -a none feat-a' >/dev/null
     export FAKE_WS_NAME=api
-    run wtsh "cd '$HOME/wt/blog/feat-a' && wt -a none feat-b && print -r -- \"PWD=\$PWD\""
+    run wtsh "cd '$T/personal/worktrees/blog/feat-a' && wt -a none feat-b && print -r -- \"PWD=\$PWD\""
     [ "$status" -eq 0 ]
-    [[ $output == *"PWD=$HOME/wt/blog/feat-b"* ]]
-    [ "$(git -C "$HOME/wt/blog/feat-b" rev-parse --git-common-dir)" = "$T/personal/blog/.git" ]
+    [[ $output == *"PWD=$T/personal/worktrees/blog/feat-b"* ]]
+    [ "$(git -C "$T/personal/worktrees/blog/feat-b" rev-parse --git-common-dir)" = "$T/personal/blog/.git" ]
 }
 
 @test "wt works in a repo outside agterm" {
     unset AGTERM_ENABLED AGTERM_WORKSPACE_ID
     run wtsh "cd '$T/work/api' && wt -a none feat-x"
     [ "$status" -eq 0 ]
-    [ -d "$HOME/wt/api/feat-x" ]
+    [ -d "$T/work/worktrees/api/feat-x" ]
     [ ! -e "$FAKE_AGTERM_LOG" ]
 }
 
 @test "repos entry may point at a repo itself" {
     make_repo "$T/elsewhere" warp
-    write_config "root = ~/wt" "repos = $T/work" "repos = $T/elsewhere/warp"
+    write_config "repos = $T/work" "repos = $T/elsewhere/warp"
     export FAKE_WS_NAME=warp
     run wtsh 'wt -a none feat-x'
     [ "$status" -eq 0 ]
-    [ "$(git -C "$HOME/wt/warp/feat-x" rev-parse --git-common-dir)" = "$T/elsewhere/warp/.git" ]
+    [ "$(git -C "$T/elsewhere/worktrees/warp/feat-x" rev-parse --git-common-dir)" = "$T/elsewhere/warp/.git" ]
     run wtsh 'wtl'
     [[ $output == *"warp"*"feat-x"* ]]
     run wtsh 'wtrm warp feat-x'
     [ "$status" -eq 0 ]
-    [ ! -e "$HOME/wt/warp" ]
+    [ ! -e "$T/elsewhere/worktrees" ]
 }
 
 # --- wtl и wtrm -----------------------------------------------------------
@@ -242,8 +291,8 @@ setup() {
     run wtsh 'wtl'
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 2 ]
-    [[ ${lines[0]} == api*feat-a*"$HOME/wt/api/feat-a" ]]
-    [[ ${lines[1]} == blog*feat-b*"$HOME/wt/blog/feat-b" ]]
+    [[ ${lines[0]} == api*feat-a*"$T/work/worktrees/api/feat-a" ]]
+    [[ ${lines[1]} == blog*feat-b*"$T/personal/worktrees/blog/feat-b" ]]
 }
 
 @test "wtrm removes clean worktree, branch and empty repo dir" {
@@ -251,28 +300,39 @@ setup() {
     wtsh 'wt -a none feat-x' >/dev/null
     run wtsh 'wtrm blo feat-x'
     [ "$status" -eq 0 ]
-    [ ! -e "$HOME/wt/blog" ]
+    [ ! -e "$T/personal/worktrees" ]
     run git -C "$T/personal/blog" show-ref --verify refs/heads/feat-x
     [ "$status" -ne 0 ]
+}
+
+@test "wtrm with a slash in suffix removes all emptied dirs up to worktrees" {
+    export FAKE_WS_NAME=api
+    wtsh 'wt -a none feat/x' >/dev/null
+    [ -d "$T/work/worktrees/api/feat/x" ]
+    run wtsh 'wtrm api feat/x'
+    [ "$status" -eq 0 ]
+    [ ! -e "$T/work/worktrees" ]
+    # Подъём остановился на worktrees/ и не дошёл до каталога с клонами.
+    [ -d "$T/work/api" ]
 }
 
 @test "wtrm asks on uncommitted change and keeps everything on no" {
     export FAKE_WS_NAME=api
     wtsh 'wt -a none feat-x' >/dev/null
-    echo dirty > "$HOME/wt/api/feat-x/dirty.txt"
+    echo dirty > "$T/work/worktrees/api/feat-x/dirty.txt"
     run zsh -f -c "source '$WT_ZSH'; print n | wtrm api feat-x"
     [ "$status" -eq 1 ]
     [[ $output == *"незакоммиченные правки"* ]]
     [[ $output == *"отменено"* ]]
-    [ -f "$HOME/wt/api/feat-x/dirty.txt" ]
+    [ -f "$T/work/worktrees/api/feat-x/dirty.txt" ]
 }
 
 @test "wtrm with one arg takes repo from current worktree" {
     export FAKE_WS_NAME=blog
     wtsh 'wt -a none feat-x' >/dev/null
-    run zsh -f -c "source '$WT_ZSH'; cd '$HOME/wt/blog/feat-x' && wtrm feat-x && print -r -- \"PWD=\$PWD\""
+    run zsh -f -c "source '$WT_ZSH'; cd '$T/personal/worktrees/blog/feat-x' && wtrm feat-x && print -r -- \"PWD=\$PWD\""
     [ "$status" -eq 0 ]
-    [ ! -e "$HOME/wt/blog/feat-x" ]
+    [ ! -e "$T/personal/worktrees/blog/feat-x" ]
     # Стояли внутри удалённого каталога — wtrm уводит в основной клон.
     [[ $output == *"PWD=$T/personal/blog"* ]]
 }

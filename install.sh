@@ -37,7 +37,7 @@ if [[ -f $conf ]]; then
     echo "ok: конфиг $conf уже есть, не трогаю"
 else
     cp "$kit_dir/wt/wt.conf.example" "$conf"
-    echo "конфиг создан из образца: $conf. Пропишите в нём root и repos"
+    echo "конфиг создан из образца: $conf. Пропишите в нём repos"
 fi
 
 rc=${ZDOTDIR:-$HOME}/.zshrc

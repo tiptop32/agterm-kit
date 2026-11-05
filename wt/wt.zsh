@@ -5,8 +5,10 @@
 #   wt -a codex <постфикс> то же, но запустить Codex
 #   wtl                    список всех worktree по всем репам
 #   wtrm <репа> <постфикс>  удалить worktree с проверками
+#   wt-migrate <старый root> перенести worktree из общей папки к их репам
 #
-# Пути берутся из конфига ~/.config/agterm-kit/wt.conf. Подробности: wt -h
+# Worktree лежат рядом с репой: <родитель репы>/worktrees/<репа>/<постфикс>.
+# Где искать репы, задаёт конфиг ~/.config/agterm-kit/wt.conf. Подробности: wt -h
 
 # Какой агент запускать. WT_CLAUDE=0 оставлен для обратной совместимости
 # и эквивалентен WT_AGENT=none, если агент не указан аргументом wt.
@@ -34,12 +36,19 @@ _wt_expand() {
     print -r -- "${p:a}"
 }
 
-# Читает конфиг в _wt_root (куда класть worktree) и _wt_repo_dirs (где искать репы).
-# Конфиг читается при каждом вызове, поэтому правка файла действует без перезапуска шелла.
-# WT_ROOT и WT_REPOS (через двоеточие, как PATH) перекрывают ключи конфига.
+# Каталог worktree: <родитель клона>/worktrees/<клон>/<постфикс>. Worktree реп из одной
+# папки собираются в одном worktrees/, а одноимённые клоны из разных папок не сталкиваются.
+# Клон приходит то от git (без симлинков), то из repos (как в конфиге): :A сводит оба к одному.
+_wt_dest() {
+    local src=${1:A}
+    print -r -- "${src:h}/worktrees/${src:t}/$2"
+}
+
+# Читает конфиг в _wt_repo_dirs (где искать репы). Конфиг читается при каждом вызове,
+# поэтому правка файла действует без перезапуска шелла. WT_REPOS (через двоеточие,
+# как PATH) перекрывает ключи конфига.
 _wt_load_config() {
     setopt localoptions extendedglob
-    typeset -g _wt_root=""
     typeset -ga _wt_repo_dirs
     _wt_repo_dirs=()
 
@@ -56,7 +65,7 @@ _wt_load_config() {
             fi
             key=${${line%%=*}//[[:space:]]/}
             value=${${line#*=}##[[:space:]]#}
-            # Комментарий в хвосте строки начинается с пробела и #: «root = ~/wt  # заметка».
+            # Комментарий в хвосте строки начинается с пробела и #: «repos = ~/git  # заметка».
             value=${value%%[[:space:]]##\#*}
             value=${value%%[[:space:]]#}
             if [[ -z $value ]]; then
@@ -64,17 +73,20 @@ _wt_load_config() {
                 return 1
             fi
             case $key in
-                root)  _wt_root=$(_wt_expand "$value") ;;
                 repos) _wt_repo_dirs+=("$(_wt_expand "$value")") ;;
+                # Прежний общий каталог. Не ошибка: старый конфиг не должен ломать wt.
+                root)
+                    print -u2 "wt: $cfg:$n: ключ root устарел и не действует, worktree теперь лежат в <родитель репы>/worktrees. Уберите его из конфига, старые worktree перенесёт wt-migrate"
+                    ;;
                 *)
-                    print -u2 "wt: $cfg:$n: неизвестный ключ «$key», допустимы root и repos"
+                    print -u2 "wt: $cfg:$n: неизвестный ключ «$key», допустим только repos"
                     return 1
                     ;;
             esac
         done < "$cfg"
     fi
 
-    [[ -n $WT_ROOT ]] && _wt_root=$(_wt_expand "$WT_ROOT")
+    [[ -n $WT_ROOT ]] && print -u2 "wt: WT_ROOT устарела и не действует, worktree теперь лежат в <родитель репы>/worktrees"
     if [[ -n $WT_REPOS ]]; then
         _wt_repo_dirs=()
         for p in "${(@s.:.)WT_REPOS}"; do
@@ -82,9 +94,9 @@ _wt_load_config() {
         done
     fi
 
-    if [[ -z $_wt_root || ${#_wt_repo_dirs} -eq 0 ]]; then
+    if (( ${#_wt_repo_dirs} == 0 )); then
         if [[ -f $cfg ]]; then
-            print -u2 "wt: в $cfg нужны ключи root и repos"
+            print -u2 "wt: в $cfg нужен ключ repos"
         else
             print -u2 "wt: нет конфига $cfg. Создайте его по образцу wt.conf.example из agterm-kit"
         fi
@@ -100,9 +112,8 @@ _wt_help() {
     fi
 
     # Справка должна открываться и без конфига: показываем, что удалось прочитать.
-    local root="(не задан)" repos="(не заданы)"
+    local repos="(не заданы)"
     if _wt_load_config 2>/dev/null; then
-        root=$_wt_root
         repos=${(j:, :)_wt_repo_dirs}
     fi
 
@@ -115,15 +126,19 @@ ${b}КОМАНДЫ${n}
   ${b}wtl${n}                      список всех worktree по всем репам
   ${b}wtrm${n} <репа> <постфикс>   удалить worktree, ветку и каталог
   ${b}wtrm${n} <постфикс>          то же, репа из текущего каталога
+  ${b}wt-migrate${n} [--apply] <старый root>
+                            перенести worktree из общей папки к их репам
 
 ${b}КОНФИГ${n} $(_wt_config_path)
-  root  = ~/wt              ${d}# куда класть worktree: <root>/<репа>/<постфикс>${n}
   repos = ~/git             ${d}# где искать репы; ключ можно повторять${n}
   repos = ~/work/git
   repos = ~/warp            ${d}# можно указать и саму репу${n}
 
-  Сейчас: root ${root}
-          repos ${repos}
+  Сейчас: repos ${repos}
+
+${b}КУДА${n}
+  Worktree ложится рядом с репой: ${b}<родитель репы>/worktrees/<репа>/<постфикс>${n}.
+  ~/git/api → ~/git/worktrees/api/fix-login. Каталог worktrees/ создаётся сам.
 
 ${b}КАК РАБОТАЕТ wt${n}
   Аргумент — только постфикс (имя ветки), репа определяется так:
@@ -153,7 +168,6 @@ ${b}КАК РАБОТАЕТ wt${n}
 
 ${b}ПЕРЕМЕННЫЕ${n}
   ${b}WT_CONFIG${n}=<файл>        другой путь к конфигу
-  ${b}WT_ROOT${n}=<путь>          перекрывает root из конфига
   ${b}WT_REPOS${n}=<путь:путь>    перекрывает repos из конфига ${d}(через двоеточие)${n}
   ${b}WT_AGENT${n}=<агент>        агент по умолчанию: claude, codex или none
   ${b}WT_CLAUDE_CMD${n}=<команда> команда запуска Claude ${d}(claude --continue || claude)${n}
@@ -180,7 +194,12 @@ ${b}ПРИМЕРЫ${n}
 
 ${b}УДАЛЕНИЕ${n}
   wtrm проверяет незакоммиченные правки и незапушенные коммиты, показывает их
-  и спрашивает подтверждение. Затем удаляет worktree, ветку и пустой каталог репы.
+  и спрашивает подтверждение. Затем удаляет worktree, ветку и пустые каталоги.
+
+${b}ПЕРЕНОС${n}
+  wt-migrate ~/wt показывает, какие worktree из прежнего общего root куда переедут.
+  wt-migrate --apply ~/wt переносит их через git worktree move. Пока в них открыты
+  сессии agterm, перенос не начнётся: шелл таких сессий потерял бы свой каталог.
 EOF
 }
 
@@ -416,8 +435,8 @@ wt() {
     local src
     src=$(_wt_cwd_repo) || src=$(_wt_workspace_repo) || return 1
 
-    local repo=${src:t}
-    local dest="$_wt_root/$repo/$suffix"
+    local repo=${src:t} dest
+    dest=$(_wt_dest "$src" "$suffix")
 
     if [[ -e $dest ]]; then
         print "wt: $dest уже существует, перехожу"
@@ -529,8 +548,8 @@ wtrm() {
         suffix=$1
     fi
 
-    local repo=${src:t}
-    local dest="$_wt_root/$repo/$suffix"
+    local repo=${src:t} dest
+    dest=$(_wt_dest "$src" "$suffix")
     [[ -d $dest ]] || { print -u2 "wtrm: нет такого worktree: $dest"; return 1 }
 
     # Не удаляем молча: сначала показываем, что будет потеряно.
@@ -553,8 +572,179 @@ wtrm() {
 
     git -C "$src" worktree remove --force "$dest" || return 1
     git -C "$src" branch -D "$suffix" >/dev/null 2>&1
-    rmdir "${dest:h}" 2>/dev/null
+    # Опустевшие каталоги вверх до worktrees/ включительно: промежуточные (feat/ у ветки
+    # feat/x), каталог репы и сам worktrees/.
+    local top=${src:A:h}/worktrees up=${dest:h}
+    while [[ $up == "$top" || $up == $top/* ]] && rmdir "$up" 2>/dev/null; do up=${up:h}; done
     print "wtrm: $repo/$suffix удалён"
+}
+
+# Каталоги, открытые в agterm: cwd, split и scratch всех сессий всех окон, по строке.
+# Без agtermctl сессий agterm нет и список пуст. agtermctl есть, но не ответил: ошибка,
+# переносить вслепую нельзя.
+_wt_open_paths() {
+    setopt localoptions pipefail
+    (( $+commands[agtermctl] )) || return 0
+    (( $+commands[jq] )) || { print -u2 "wt-migrate: нужен jq, чтобы проверить открытые сессии agterm"; return 1 }
+    local windows id
+    windows=$(agtermctl window list --json 2>/dev/null \
+        | jq -r '.result.windows[] | select(.open != false) | .id') || {
+        print -u2 "wt-migrate: agterm не ответил, открытые сессии не проверить. Запустите agterm и повторите"
+        return 1
+    }
+    for id in ${(f)windows}; do
+        agtermctl tree --json --window "$id" 2>/dev/null \
+            | jq -r '.result.tree.workspaces[]?.sessions[]? | .cwd, .splitCwd, .scratchCwd | select(. != null and . != "")' || {
+            print -u2 "wt-migrate: не прочитать сессии окна $id"
+            return 1
+        }
+    done
+}
+
+# wt-migrate [--apply] <старый root>: переносит worktree из прежней общей папки
+# <root>/<репа>/<постфикс> в <родитель репы>/worktrees/<репа>/<постфикс>.
+# Без --apply только показывает план. Трогает лишь worktree реп из repos, лежащие
+# внутри старого root: остальные (например, .claude/worktrees) остаются на месте.
+wt-migrate() {
+    [[ $1 == -h || $1 == --help ]] && { _wt_help; return 0 }
+
+    local apply=0
+    [[ $1 == --apply ]] && { apply=1; shift }
+    if (( $# != 1 )); then
+        print -u2 "usage: wt-migrate [--apply] <старый root>   (wt -h — подробнее)"
+        return 2
+    fi
+
+    local given old
+    given=$(_wt_expand "$1")
+    [[ -d $given ]] || { print -u2 "wt-migrate: нет каталога $given"; return 1 }
+    # git печатает пути worktree без симлинков, сравниваем в том же виде.
+    old=${given:A}
+    _wt_load_config || return 1
+
+    local -a from to owner skipped known seen
+    local line main rec p flag rel dest home
+    for line in "${(@f)$(_wt_repos)}"; do
+        [[ -n $line ]] || continue
+        main=${${line#*$'\t'}:A}
+        # Одна репа может попасть в repos дважды: каталогом и самим клоном.
+        (( ${seen[(Ie)$main]} )) && continue
+        seen+=("$main")
+
+        p="" flag=""
+        # Записи porcelain разделены пустой строкой; последнюю закрывает добавленный "".
+        for rec in "${(@f)$(git -C "$main" worktree list --porcelain 2>/dev/null)}" ""; do
+            case $rec in
+                "worktree "*) p=${rec#worktree } flag="" ;;
+                locked*)      flag="заблокирован (git worktree unlock)" ;;
+                prunable*)    flag="каталога нет (git worktree prune)" ;;
+                "")
+                    if [[ -n $p && $p != "$main" && $p == $old/* ]]; then
+                        known+=("$p")
+                        # <старый root>/<репа>/<постфикс>; в постфиксе бывает /, как в имени ветки.
+                        # Первым должен идти каталог репы: иначе root указан не тот (на уровень
+                        # глубже или выше), и постфикс по пути не восстановить.
+                        rel=${p#$old/}
+                        home=${$(_wt_dest "$main" x):h}
+                        dest=$(_wt_dest "$main" "${rel#*/}")
+                        if [[ $p == $home/* ]]; then
+                            skipped+=("$p: уже на новом месте")
+                        elif [[ $rel != ${main:t}/?* ]]; then
+                            skipped+=("$p: путь не по схеме <старый root>/${main:t}/<постфикс>, проверьте старый root")
+                        elif [[ -n $flag ]]; then
+                            skipped+=("$p: $flag")
+                        elif [[ -e $dest || -L $dest ]]; then
+                            skipped+=("$p: место занято, $dest")
+                        else
+                            from+=("$p") to+=("$dest") owner+=("$main")
+                        fi
+                    fi
+                    p="" flag=""
+                    ;;
+            esac
+        done
+    done
+
+    # Каталоги старого root, которые не оказались worktree ни одной репы из repos:
+    # каталог репы целиком, если в нём нет ни одного worktree, иначе отдельные постфиксы.
+    local -a unknown
+    local d d2 k hit
+    for d in "$old"/*(/N); do
+        hit=0
+        for k in $known; do
+            [[ $k == "$d" || $k == $d/* ]] && { hit=1; break }
+        done
+        (( hit )) || { unknown+=("$d"); continue }
+        for d2 in "$d"/*(/N); do
+            hit=0
+            for k in $known; do
+                [[ $k == "$d2" || $k == $d2/* || $d2 == $k/* ]] && { hit=1; break }
+            done
+            (( hit )) || unknown+=("$d2")
+        done
+    done
+
+    local i
+    print -r -- "wt-migrate: $old"
+    for (( i = 1; i <= ${#from}; i++ )); do
+        print -r -- "  ${from[i]} → ${to[i]}"
+    done
+    for line in $skipped; do print -r -- "  пропуск: $line"; done
+    for line in $unknown; do print -r -- "  не worktree реп из repos, не трогаю: $line"; done
+
+    if (( ! apply )); then
+        print -r -- "перенесу ${#from}, пропущу ${#skipped}. Перенести: wt-migrate --apply $1"
+        return 0
+    fi
+
+    if (( ${#from} )); then
+        # Шелл, стоящий в переносимом каталоге, остался бы в удалённом пути.
+        local here=${PWD:A} f o
+        for f in $from; do
+            if [[ $here == "$f" || $here == $f/* ]]; then
+                print -u2 "wt-migrate: шелл стоит в $f. Перейдите в другой каталог и повторите"
+                return 1
+            fi
+        done
+
+        local opened
+        opened=$(_wt_open_paths) || return 1
+        local -a busy
+        for o in ${(f)opened}; do
+            o=${o:A}
+            for f in $from; do
+                [[ $o == "$f" || $o == $f/* ]] && { busy+=("$o"); break }
+            done
+        done
+        if (( ${#busy} )); then
+            print -u2 "wt-migrate: в переносимых worktree открыты сессии agterm. Закройте их и повторите:"
+            print -u2 -l -- "  "${^busy}
+            return 1
+        fi
+    fi
+
+    local moved=0 failed=0 up
+    for (( i = 1; i <= ${#from}; i++ )); do
+        mkdir -p "${to[i]:h}"
+        if git -C "${owner[i]}" worktree move "${from[i]}" "${to[i]}"; then
+            (( moved++ ))
+            # Каталоги старого root, которые опустели после переноса. Чужие пустые не трогаем.
+            up=${from[i]:h}
+            while [[ $up == $old/* ]] && rmdir "$up" 2>/dev/null; do up=${up:h}; done
+        else
+            (( failed++ ))
+            print -u2 -r -- "wt-migrate: не перенесён ${from[i]}"
+            # Убираем пустые каталоги, созданные под этот worktree.
+            up=${to[i]:h}
+            while [[ $up != "${owner[i]:h}" ]] && rmdir "$up" 2>/dev/null; do up=${up:h}; done
+        fi
+    done
+
+    # Сам root убираем, только если его опустошил перенос. Симлинк не трогаем:
+    # rmdir удалил бы каталог за ним и оставил висячую ссылку.
+    (( moved )) && [[ ! -L $given ]] && rmdir "$old" 2>/dev/null
+    print -r -- "wt-migrate: перенесено $moved, не удалось $failed, пропущено ${#skipped}"
+    (( failed == 0 ))
 }
 
 # Для wt дополняем только выбор агента: имя ветки остаётся свободным.
@@ -564,18 +754,27 @@ _wt_complete() {
         '1:постфикс ветки'
 }
 
-# wtrm: первый аргумент — репа (каталог в root), второй — постфикс worktree.
+# wtrm: первый аргумент — репа из repos, второй — постфикс её worktree.
 _wtrm_complete() {
     _wt_load_config 2>/dev/null || return 1
     if (( CURRENT == 2 )); then
-        local repos=("$_wt_root"/*(/N:t))
+        local repos=("${(@)${(@f)$(_wt_repos)}%%$'\t'*}")
         compadd -a repos
     elif (( CURRENT == 3 )); then
-        local wts=("$_wt_root/${words[2]}"/*(/N:t))
+        local src
+        src=$(_wt_repo_path "${words[2]}") || return 1
+        local wts=("${$(_wt_dest "$src" x):h}"/*(/N:t))
         compadd -a wts
     fi
+}
+
+_wt_migrate_complete() {
+    _arguments \
+        '--apply[перенести, а не только показать]' \
+        '1:старый root:_files -/'
 }
 (( $+functions[compdef] )) && {
     compdef _wt_complete wt
     compdef _wtrm_complete wtrm
+    compdef _wt_migrate_complete wt-migrate
 }

@@ -76,6 +76,12 @@ def worktrees(repo: str) -> list[dict]:
     return records
 
 
+def worktree_home(repo: str) -> Path:
+    # Та же формула, что _wt_dest в wt.zsh: <родитель клона>/worktrees/<клон>, без симлинков.
+    real = Path(repo).resolve()
+    return real.parent / "worktrees" / real.name
+
+
 def registered(repo: str, path: str) -> dict:
     for item in worktrees(repo):
         if item["path"] == path:
@@ -138,13 +144,9 @@ def create(config: dict, repo_path: str, branch: str, agent: str) -> dict:
     if not branch or branch.startswith("-") or branch != branch.strip():
         raise Failure("Введите корректное имя ветки без пробелов по краям")
     git(repo_path, "check-ref-format", "--branch", branch)
-    dest = Path(config["root"]) / repo["name"] / branch
-    if not dest.resolve().is_relative_to(Path(config["root"]).resolve() / repo["name"]):
-        raise Failure("Путь worktree выходит за root из wt.conf")
-    for other in config["repos"]:
-        if other["path"] != repo_path and other["name"] == repo["name"]:
-            # wt использует basename репы в пути назначения. Не даём двум клонам делить root.
-            raise Failure("У двух репозиториев одинаковое имя. Для создания задайте отдельный WT_ROOT или уберите дубль из repos")
+    dest = worktree_home(repo_path) / branch
+    if not dest.resolve().is_relative_to(worktree_home(repo_path)):
+        raise Failure("Путь worktree выходит за каталог worktrees репозитория")
     if dest.exists() or dest.is_symlink():
         item = registered(repo_path, str(dest))
         if item["branch"] != branch:
@@ -175,9 +177,9 @@ def remove(config: dict, repo_path: str, path: str, confirmation: str) -> dict:
     item = registered(repo_path, path)
     if item["main"] or not item["branch"] or "locked" in item or "prunable" in item:
         raise Failure("Основной клон, detached, locked или недоступный worktree удалять нельзя")
-    # GUI управляет удалением только worktree внутри заданного root.
-    if not Path(path).resolve().is_relative_to(Path(config["root"]).resolve()):
-        raise Failure("Worktree находится вне root из wt.conf")
+    # GUI удаляет только worktree, которые создаёт wt: внутри каталога worktrees репозитория.
+    if not Path(path).resolve().is_relative_to(worktree_home(repo_path)):
+        raise Failure("Worktree лежит вне каталога worktrees репозитория")
     if confirmation != item["branch"]:
         raise Failure("Для удаления введите точное имя ветки")
     for active in open_paths():
@@ -216,7 +218,7 @@ def snapshot(config: dict) -> dict:
             projects.append({**repo, "worktrees": items})
         except Failure as exc:
             projects.append({**repo, "worktrees": [], "error": str(exc)})
-    return {"projects": projects, "root": config["root"]}
+    return {"projects": projects}
 
 
 def act(request: dict) -> dict:
