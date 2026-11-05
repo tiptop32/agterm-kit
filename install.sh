@@ -53,6 +53,14 @@ else
     echo "конфиг создан из образца: $ask_conf"
 fi
 
+lb_conf=$config_home/agterm-kit/lb-limits.conf
+if [[ -f $lb_conf ]]; then
+    echo "ok: конфиг $lb_conf уже есть, не трогаю"
+else
+    cp "$kit_dir/lb-limits/lb-limits.conf.example" "$lb_conf"
+    echo "конфиг создан из образца: $lb_conf. Пропишите в нём password_file, затем: $kit_dir/lb-limits/lb-limits ccstatusline"
+fi
+
 # resolve <путь>: файл за цепочкой симлинков. settings.json бывает симлинком в репозиторий
 # dotfiles: пишем в настоящий файл, а симлинк оставляем как есть.
 resolve() {

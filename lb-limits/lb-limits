@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""lb-limits: лимиты пула аккаунтов agent-lb одной строкой для статус-строки.
+
+  lb-limits                печатает строку из кэша; устаревший кэш обновляется в фоне
+  lb-limits refresh        синхронно обновить кэш (для отладки), код возврата 0 при успехе
+  lb-limits ccstatusline   заменить виджеты лимитов в ccstatusline на эту строку
+
+Цифры те же, что в блоке «Pool details» дашборда: GET /api/pools. API закрыт сессией
+дашборда, поэтому скрипт входит паролем из password_file и хранит cookie в кэше.
+Конфиг ~/.config/agterm-kit/lb-limits.conf читается как данные, образец рядом со скриптом.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from http.cookies import SimpleCookie
+from pathlib import Path
+
+COOKIE_NAME = "agent_lb_dashboard_session"
+DEFAULTS = {
+    "url": "http://127.0.0.1:2455",
+    "pool": "anthropic-general",
+    "password_file": "",
+    "password_key": "CODEX_LB_DASHBOARD_PASSWORD",
+    "ttl": "60",
+    "label": "",
+}
+# После ошибки входа повторяем не раньше чем через 15 минут: частые неверные попытки
+# упираются в ограничитель попыток дашборда.
+AUTH_BACKOFF = 900
+HTTP_TIMEOUT = 5.0
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+GREEN, YELLOW, RED, DIM, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
+# Виджеты ccstatusline, которые показывают лимиты одного аккаунта Claude Code.
+ACCOUNT_WIDGETS = {
+    "session-usage",
+    "reset-timer",
+    "weekly-usage",
+    "weekly-reset-timer",
+    "weekly-opus-usage",
+    "weekly-sonnet-usage",
+}
+
+
+class LbError(Exception):
+    """Ошибка обновления: короткий текст для статус-строки и пауза до следующей попытки."""
+
+    def __init__(self, short: str, backoff: int | None = None):
+        super().__init__(short)
+        self.short = short
+        self.backoff = backoff
+
+
+def config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def cache_dir() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "agterm-kit" / "lb-limits"
+
+
+def read_kv(path: Path) -> dict[str, str]:
+    """Файл KEY=VALUE как данные: комментарии и пустые строки пропускаются, кавычки снимаются."""
+    values: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def load_config() -> dict[str, str]:
+    conf = dict(DEFAULTS)
+    path = Path(os.environ.get("LB_LIMITS_CONFIG") or config_home() / "agterm-kit" / "lb-limits.conf")
+    if path.is_file():
+        conf.update({k: v for k, v in read_kv(path).items() if k in DEFAULTS})
+    return conf
+
+
+def ttl_of(conf: dict[str, str]) -> int:
+    try:
+        return max(5, int(conf["ttl"]))
+    except ValueError:
+        return int(DEFAULTS["ttl"])
+
+
+def write_atomic(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+# --- обращение к балансеру -----------------------------------------------------------
+
+
+def http(conf: dict[str, str], method: str, path: str, *, cookie: str = "", body: dict | None = None):
+    """Запрос к балансеру мимо системного прокси: он локальный. Возвращает (код, заголовки, тело)."""
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if cookie:
+        headers["Cookie"] = f"{COOKIE_NAME}={cookie}"
+    request = urllib.request.Request(conf["url"].rstrip("/") + path, data=data, headers=headers, method=method)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=HTTP_TIMEOUT) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise LbError("нет связи") from exc
+
+
+def error_code(body: bytes) -> str:
+    try:
+        return str(json.loads(body).get("error", {}).get("code") or "")
+    except (ValueError, AttributeError):
+        return ""
+
+
+def read_password(conf: dict[str, str]) -> str:
+    if not conf["password_file"]:
+        raise LbError("нужен password_file", AUTH_BACKOFF)
+    path = Path(os.path.expanduser(conf["password_file"]))
+    try:
+        password = read_kv(path).get(conf["password_key"], "")
+    except OSError as exc:
+        raise LbError("нет password_file", AUTH_BACKOFF) from exc
+    if not password:
+        raise LbError(f"нет {conf['password_key']}", AUTH_BACKOFF)
+    return password
+
+
+def login(conf: dict[str, str]) -> str:
+    status, headers, body = http(
+        conf, "POST", "/api/dashboard-auth/password/login", body={"password": read_password(conf)}
+    )
+    if status == 429:
+        raise LbError("вход: много попыток", AUTH_BACKOFF)
+    if status != 200:
+        raise LbError("вход не удался" if status == 401 else f"вход: HTTP {status}", AUTH_BACKOFF)
+    for header in headers.get_all("Set-Cookie") or []:
+        jar = SimpleCookie()
+        jar.load(header)
+        if COOKIE_NAME in jar:
+            return jar[COOKIE_NAME].value
+    raise LbError("вход: нет cookie", AUTH_BACKOFF)
+
+
+def fetch_pools(conf: dict[str, str]) -> dict:
+    cookie_file = cache_dir() / "cookie"
+    cookie = cookie_file.read_text().strip() if cookie_file.is_file() else ""
+    status, _, body = http(conf, "GET", "/api/pools", cookie=cookie)
+    if status == 401:
+        if error_code(body) == "totp_required":
+            raise LbError("нужен TOTP", AUTH_BACKOFF)
+        cookie = login(conf)
+        write_atomic(cookie_file, cookie + "\n")
+        status, _, body = http(conf, "GET", "/api/pools", cookie=cookie)
+        if status == 401:
+            raise LbError("нужен TOTP" if error_code(body) == "totp_required" else "вход не удался", AUTH_BACKOFF)
+    if status != 200:
+        raise LbError(f"HTTP {status}")
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise LbError("не JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("pools"), list):
+        raise LbError("не тот ответ")
+    return payload
+
+
+def refresh(conf: dict[str, str]) -> int:
+    """Обновить кэш. Параллельный запуск (другая вкладка) не дублирует запрос: замок."""
+    directory = cache_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    with open(directory / "lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        try:
+            payload = fetch_pools(conf)
+        except LbError as exc:
+            write_atomic(directory / "error.json", json.dumps({
+                "at": time.time(), "short": exc.short, "backoff": exc.backoff or ttl_of(conf),
+            }))
+            print(f"lb-limits: {exc.short}", file=sys.stderr)
+            return 1
+        write_atomic(directory / "pools.json", json.dumps({"fetchedAt": time.time(), "response": payload}))
+        (directory / "error.json").unlink(missing_ok=True)
+    return 0
+
+
+def spawn_refresh() -> None:
+    subprocess.Popen(  # noqa: S603 -- запускаем сами себя
+        [sys.executable, os.path.abspath(__file__), "refresh"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+# --- вывод строки ----------------------------------------------------------------------
+
+
+def js_round(value: float) -> int:
+    """Math.round из дашборда: половина округляется вверх, а не к чётному."""
+    return math.floor(value + 0.5)
+
+
+def tone(percent: float) -> str:
+    """Пороги fillTone из дашборда: больше 30 зелёный, от 10 жёлтый, ниже красный."""
+    return GREEN if percent > 30 else YELLOW if percent >= 10 else RED
+
+
+def parse_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return None
+
+
+def duration(seconds: float) -> str:
+    """duration() из дашборда: «39m», «2h 39m», «3d 4h»; минуты округляются вверх."""
+    minutes = max(0, math.ceil(seconds / 60))
+    if minutes < 60:
+        return f"{minutes}m"
+    days, hours, mins = minutes // 1440, minutes % 1440 // 60, minutes % 60
+    if days:
+        return f"{days}d" + (f" {hours}h" if hours else "")
+    return f"{hours}h" + (f" {mins}m" if mins else "")
+
+
+def day_time(moment: datetime) -> str:
+    return f"{WEEKDAYS[moment.weekday()]} {moment:%H:%M}"
+
+
+def meter(unit: str, remaining: object, reset: str, out: bool, color: bool) -> str:
+    if remaining is None and not out:
+        return f"{unit} —"
+    percent = 0.0 if out else min(100.0, max(0.0, float(remaining)))  # type: ignore[arg-type]
+    out = out or percent <= 0
+    value = "Out" if out else f"{js_round(percent)}%"
+    text = f"{unit} {value}" + (f" {reset}" if reset and not out else "")
+    if not color:
+        return text
+    return f"{RED if out else tone(percent)}{unit} {value}{RESET}" + (f" {DIM}{reset}{RESET}" if reset and not out else "")
+
+
+def render_pool(pool: dict, label: str, now: float, color: bool) -> str:
+    parts = [f"{label} {pool.get('eligibleAccounts', '?')}/{pool.get('accounts', '?')}"]
+    five = pool.get("fiveHourRemainingPercent")
+    five_reset = parse_time(pool.get("fiveHourResetAt"))
+    if five is not None or five_reset is not None:
+        reset = duration(five_reset.timestamp() - now) if five_reset else ""
+        parts.append(meter("5h", five, reset, False, color))
+    long = pool.get("weeklyRemainingPercent")
+    if long is None and pool.get("windowLabel"):
+        long = pool.get("aggregateRemainingPercent")
+    long_reset = parse_time(pool.get("weeklyResetAt") or pool.get("resetAt"))
+    out = pool.get("status") == "exhausted" or (long is not None and float(long) <= 0)
+    unit = "mo" if pool.get("windowLabel") == "month" else "wk"
+    parts.append(meter(unit, long, day_time(long_reset) if long_reset else "", out, color))
+    return " · ".join(parts)
+
+
+def short_age(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h"
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def status_line(conf: dict[str, str], color: bool) -> str:
+    directory = cache_dir()
+    now = time.time()
+    ttl = ttl_of(conf)
+    cached = read_json(directory / "pools.json")
+    error = read_json(directory / "error.json")
+    age = now - float(cached.get("fetchedAt", 0)) if cached else math.inf
+    in_backoff = bool(error) and now - float(error.get("at", 0)) < float(error.get("backoff", ttl))
+    if age > ttl and not in_backoff:
+        spawn_refresh()
+    label = conf["label"] or ("Claude" if conf["pool"] == "anthropic-general" else conf["pool"])
+    if not cached:
+        return f"lb: {error['short']}" if error else "lb: …"
+    pools = cached.get("response", {}).get("pools", [])
+    pool = next((p for p in pools if isinstance(p, dict) and p.get("id") == conf["pool"]), None)
+    if pool is None:
+        return f"lb: нет пула {conf['pool']}"
+    line = render_pool(pool, label, now, color)
+    # Данные старше пяти обновлений: балансер недоступен или вход сломан, цифры уже неточные.
+    if age > max(5 * ttl, 300):
+        note = f"{short_age(age)} назад" + (f", {error['short']}" if error else "")
+        line += f" {DIM}({note}){RESET}" if color else f" ({note})"
+    return line
+
+
+# --- настройка ccstatusline ----------------------------------------------------------
+
+
+def setup_ccstatusline() -> int:
+    """Заменить виджеты лимитов аккаунта на custom-command с этим скриптом.
+
+    Новый виджет встаёт на место первого из заменённых, а разделители, которые после
+    удаления оказались рядом или по краям строки, убираются. Повторный запуск ничего не меняет.
+    """
+    path = config_home() / "ccstatusline" / "settings.json"
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"lb-limits: не прочитать {path}: {exc}", file=sys.stderr)
+        return 1
+    command = os.path.abspath(__file__)
+    want = {"id": "lb-limits", "type": "custom-command", "commandPath": command,
+            "timeout": 1000, "preserveColors": True}
+    lines = settings.get("lines")
+    if not isinstance(lines, list):
+        print(f"lb-limits: в {path} нет lines", file=sys.stderr)
+        return 1
+    placed = False
+    new_lines = []
+    for line in lines:
+        out = []
+        for widget in line:
+            kind = widget.get("type")
+            if kind in ACCOUNT_WIDGETS or (kind == "custom-command" and widget.get("commandPath") == command):
+                if not placed:
+                    out.append(want)
+                    placed = True
+                continue
+            out.append(widget)
+        new_lines.append(tidy_separators(out))
+    if not placed:
+        new_lines[0] = tidy_separators(new_lines[0] + [{"id": "lb-limits-sep", "type": "separator"}, want])
+    new = {**settings, "lines": new_lines}
+    if new == settings:
+        print(f"ok: {path} уже показывает лимиты балансера")
+        return 0
+    backup = path.with_name(f"{path.name}.bak.{time.strftime('%Y%m%d%H%M%S')}")
+    backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    write_atomic(path, json.dumps(new, indent=2, ensure_ascii=False) + "\n", 0o644)
+    print(f"ccstatusline: виджет lb-limits записан в {path}, прежняя версия в {backup}")
+    return 0
+
+
+def tidy_separators(widgets: list) -> list:
+    out: list = []
+    for widget in widgets:
+        if widget.get("type") == "separator" and (not out or out[-1].get("type") == "separator"):
+            continue
+        out.append(widget)
+    while out and out[-1].get("type") == "separator":
+        out.pop()
+    return out
+
+
+def main(argv: list[str]) -> int:
+    command = argv[1] if len(argv) > 1 else ""
+    if command == "refresh":
+        return refresh(load_config())
+    if command == "ccstatusline":
+        return setup_ccstatusline()
+    if command:
+        print("usage: lb-limits [refresh|ccstatusline]", file=sys.stderr)
+        return 2
+    # ccstatusline передаёт на stdin JSON сессии: он не нужен, но канал читаем до конца.
+    if not sys.stdin.isatty():
+        sys.stdin.read()
+    print(status_line(load_config(), color=not os.environ.get("NO_COLOR")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -10,6 +10,7 @@
 - [GUI и cookbook](workflows/README.md): проекты, задачи и worktree с Claude, рецензии
   документов, dashboard, восстановление разговоров и компаньоны. Установка: `make install-gui`.
   Панель задач: **Ctrl+Shift+W**, оформление в стиле JetBrains New UI Dark.
+- `lb-limits`: лимиты пула аккаунтов agent-lb в статус-строке Claude Code.
 
 ## wt
 
@@ -239,6 +240,75 @@ JSON-конфиги меняются атомарно: новая версия �
 работает сразу. Правку `settings.json` Claude Code замечает сам. Codex и OpenCode читают
 MCP-серверы при старте: уже запущенные сессии увидят `ask_user` после перезапуска.
 
+## lb-limits
+
+Claude Code ходит через балансер agent-lb, а встроенные виджеты ccstatusline (`session-usage`,
+`weekly-usage`) показывают лимиты одного аккаунта. `lb-limits/lb-limits` печатает лимиты всего
+пула, те же, что в блоке «Pool details» дашборда:
+
+```
+Claude 1/2 · 5h 79% 2h 39m · wk 83% Fri 17:00
+```
+
+`1/2`: сколько аккаунтов пула могут взять работу из скольких. `5h` и `wk`: остаток пятичасового
+и недельного окна и время до сброса (для месячных пулов `mo`). Округление, формат времени и
+цвета (больше 30% зелёный, от 10% жёлтый, ниже красный, `Out` при исчерпании) взяты из дашборда.
+
+### Установка
+
+```sh
+./install.sh                          # создаст ~/.config/agterm-kit/lb-limits.conf из образца
+$EDITOR ~/.config/agterm-kit/lb-limits.conf   # password_file: файл с паролем дашборда
+lb-limits/lb-limits refresh           # проверка: 0 и пусто в stderr
+lb-limits/lb-limits ccstatusline      # заменить виджеты лимитов в ccstatusline
+```
+
+`lb-limits ccstatusline` заменяет в `~/.config/ccstatusline/settings.json` виджеты
+`session-usage`, `reset-timer`, `weekly-usage`, `weekly-reset-timer`, `weekly-opus-usage` и
+`weekly-sonnet-usage` одним `custom-command` на месте первого из них, лишние разделители
+убирает. Прежний файл сохраняется в `settings.json.bak.<время>`, повторный запуск ничего не меняет.
+Если таких виджетов нет, лимиты дописываются в конец первой строки. Перезапуск Claude Code не нужен:
+ccstatusline перечитывает настройки при каждой отрисовке.
+
+### Конфиг
+
+`~/.config/agterm-kit/lb-limits.conf` (другой путь задаёт `LB_LIMITS_CONFIG`), строки `ключ=значение`,
+образец `lb-limits/lb-limits.conf.example`:
+
+| Ключ | По умолчанию | Что |
+|---|---|---|
+| `url` | `http://127.0.0.1:2455` | адрес agent-lb |
+| `pool` | `anthropic-general` | id пула из `GET /api/pools` |
+| `password_file` | нет | файл `KEY=VALUE` с паролем дашборда, например `.env.local` рядом с docker-compose |
+| `password_key` | `CODEX_LB_DASHBOARD_PASSWORD` | ключ пароля в этом файле |
+| `ttl` | `60` | секунды между обновлениями |
+| `label` | `Claude` для `anthropic-general`, иначе id | подпись перед лимитами |
+
+### Как работает
+
+`/api/pools` закрыт сессией дашборда, API-ключ клиента к нему не подходит. Скрипт входит через
+`POST /api/dashboard-auth/password/login` и хранит cookie сессии в
+`~/.cache/agterm-kit/lb-limits/cookie` (права 600). Пароль читается из `password_file` только
+для входа и никуда не копируется. Когда сессия истекает, балансер отвечает 401, и скрипт входит заново.
+
+ccstatusline ждёт команду 1 секунду, поэтому строка всегда печатается из кэша
+(`~/.cache/agterm-kit/lb-limits/pools.json`). Если кэш старше `ttl`, в фоне запускается
+`lb-limits refresh`; замок не даёт нескольким вкладкам опрашивать балансер одновременно.
+
+Сообщения вместо лимитов:
+
+| Строка | Причина |
+|---|---|
+| `lb: …` | первый запуск, кэш ещё пуст |
+| `lb: нужен password_file` | балансер требует вход, а пароль не настроен |
+| `lb: вход не удался` | неверный пароль; следующая попытка через 15 минут, чтобы не упереться в лимит попыток |
+| `lb: нужен TOTP` | в дашборде включён TOTP, скрипт его не поддерживает |
+| `lb: нет связи` | балансер не отвечает |
+| `lb: нет пула <id>` | в ответе нет пула из `pool` |
+| `… (12m назад, нет связи)` | цифры старше пяти обновлений: показаны последние известные и причина |
+
+`NO_COLOR` отключает цвета.
+
 ## Статус omp в agterm
 
 Расширение `omp/agterm-status.ts` обновляет статус сессии в сайдбаре agterm. При событиях
@@ -329,7 +399,7 @@ cut -f2,3 ~/.local/state/agterm-kit/ask.log | sort | uniq -c
 ## Разработка
 
 ```sh
-make test     # bats: wt, ask и install.sh с поддельным agtermctl
+make test     # bats: wt, ask, lb-limits и install.sh с поддельными agtermctl и agent-lb
 make lint     # zsh -n и shellcheck
 make hooks    # pre-commit: lint и тесты перед каждым коммитом
 make eval     # платный eval ask на настоящих Codex и OpenCode, нужен agterm
@@ -356,6 +426,7 @@ ask/ask-hook.sh      хук AskUserQuestion для Claude Code
 ask/agterm-ask-mcp   MCP-сервер с ask_user для Codex и OpenCode
 ask/ask.html         шаблон страницы с вопросами
 ask/ask.conf.example образец конфига ask
+lb-limits/lb-limits  лимиты пула agent-lb для ccstatusline
 install.sh           установка симлинка, конфигов, хука и MCP-серверов
 evals/               платные evals на настоящих агентах
 tests/               bats-тесты

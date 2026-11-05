@@ -1,0 +1,18 @@
+# Конфиг lb-limits: ~/.config/agterm-kit/lb-limits.conf. Читается как данные, не исполняется.
+
+# Адрес agent-lb.
+url=http://127.0.0.1:2455
+
+# Пул из блока «Pool details»: anthropic-general, openai-codex и другие id из GET /api/pools.
+pool=anthropic-general
+
+# Файл с паролем дашборда в формате KEY=VALUE и имя ключа в нём. Пароль никуда не копируется:
+# скрипт читает его только для входа, когда сессия дашборда истекла.
+password_file=~/path/to/codex-lb/.env.local
+password_key=CODEX_LB_DASHBOARD_PASSWORD
+
+# Как часто, в секундах, обновлять цифры. Статус-строка всегда берёт их из кэша, запрос идёт в фоне.
+ttl=60
+
+# Подпись перед лимитами. Пусто: Claude для anthropic-general, иначе id пула.
+label=

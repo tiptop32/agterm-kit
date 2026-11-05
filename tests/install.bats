@@ -14,6 +14,7 @@ setup() {
     [ "$status" -eq 0 ]
     [ "$(readlink "$XDG_CONFIG_HOME/zsh/wt.zsh")" = "$WT_ZSH" ]
     cmp "$KIT_DIR/wt/wt.conf.example" "$XDG_CONFIG_HOME/agterm-kit/wt.conf"
+    cmp "$KIT_DIR/lb-limits/lb-limits.conf.example" "$XDG_CONFIG_HOME/agterm-kit/lb-limits.conf"
     [[ $output == *"добавьте в $HOME/.zshrc строку: source $XDG_CONFIG_HOME/zsh/wt.zsh"* ]]
 }
 
