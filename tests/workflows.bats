@@ -41,6 +41,12 @@ PY
     jq -e '.model == "opus" and .hooks.Stop[0].hooks[0].command == "my-status-hook" and (.hooks.Stop|length)==2' "$HOME/.claude/settings.json"
     [ -L "$HOME/.claude/skills/webrev" ]
     [ "$(cat "$HOME/.claude/skills/agdoc/SKILL.md")" = '# fixture doc skill' ]
+    # Стадии работы: хук на скилы и Bash, на промпт и на старт сессии, клавиша доски.
+    jq -e '[.hooks.PreToolUse[] | select(.matcher == "Skill") | .hooks[].command | select(endswith("agterm-stage hook || true"))] | length == 1' "$HOME/.claude/settings.json"
+    jq -e '[.hooks.PostToolUse[] | select(.matcher == "Bash") | .hooks[].command | select(endswith("agterm-stage hook || true"))] | length == 1' "$HOME/.claude/settings.json"
+    jq -e '[.hooks.SessionStart[].hooks[].command | select(endswith("agterm-stage hook || true"))] | length == 1' "$HOME/.claude/settings.json"
+    jq -e '[.hooks.UserPromptSubmit[].hooks[].command | select(endswith("agterm-stage hook || true") or endswith("run.py context"))] | length == 2' "$HOME/.claude/settings.json"
+    grep -q '^command "Доска стадий" ctrl+shift+k --error-hud .* board$' "$T/dotfiles/keymap"
     cp "$T/dotfiles/keymap" "$T/keymap.first"
     cp "$HOME/.claude/settings.json" "$T/settings.first"
     run python3 "$TEST_KIT/workflows/install.py" --source "$T/source"

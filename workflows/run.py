@@ -61,6 +61,8 @@ def main() -> int:
     action = sys.argv[1] if len(sys.argv) == 2 else ""
     if action in ("project", "worktrees"):
         os.execv(sys.executable, [sys.executable, str(HERE.parent / "wt/gui.py"), action])
+    if action == "board":
+        os.execv(sys.executable, [sys.executable, str(HERE.parent / "stages/agterm-stage"), "board"])
     if action not in RECIPES:
         raise ValueError("Неизвестное действие")
     if action == "finish-offer" and asks_user(sys.stdin.read()):

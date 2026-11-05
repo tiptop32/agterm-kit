@@ -11,6 +11,7 @@
   документов, dashboard, восстановление разговоров и компаньоны. Установка: `make install-gui`.
   Панель задач: **Ctrl+Shift+W**, оформление в стиле JetBrains New UI Dark.
 - `lb-limits`: лимиты пула аккаунтов agent-lb в статус-строке Claude Code.
+- `stages`: стадия работы агента под каждой сессией и доска по всем сессиям.
 
 ## wt
 
@@ -240,6 +241,77 @@ JSON-конфиги меняются атомарно: новая версия �
 работает сразу. Правку `settings.json` Claude Code замечает сам. Codex и OpenCode читают
 MCP-серверы при старте: уже запущенные сессии увидят `ask_user` после перезапуска.
 
+## Стадии работы и доска
+
+Задача идёт по стадиям: **анализ** (разбор требований) → **план** → **выполнение** → **ревью** →
+**MR** (и разбор замечаний) → **готово**. Под каждой сессией Claude Code в сайдбаре agterm видно
+стадию и короткую сводку, что происходит сейчас:
+
+```
+◈ План · раздаю задачи 3/7
+```
+
+Доска (**Ctrl+Shift+K** или «Доска стадий» в палитре) показывает все такие сессии колонками по
+стадиям. Карточки обновляются каждые 2 секунды: имя сессии, сводка, проект, папка (у worktree это ветка), статус агента
+(зелёный — работает, янтарный — ждёт вас). Клик переходит к сессии, `/` ищет по имени и сводке.
+Сессии, которые ждут ответа, поднимаются наверх колонки, а счётчик «ждут вас» в шапке ведёт к первой.
+
+### Откуда берётся стадия
+
+- **Скилы.** Хук `PreToolUse` на `Skill` и слэш-команды в промпте переключают стадию сами:
+  `brainstorm`, `grilling`, `research`, `diagnosing-bugs`, `kaiten`, `allure-triage` → анализ;
+  `planning:make` → план; `planning:exec`, `plan-dispatch`, `tdd` → выполнение;
+  `review-refactor`, `code-review`, `gpt-review`, `simplify`, `security-review` → ревью;
+  `gitlab-mr`, `pr` → MR.
+- **Команды.** Успешные `glab mr create`/`gh pr create` → MR, `glab mr merge`/`gh pr merge` → готово.
+  Их ловит `PostToolUse`, поэтому отклонённый или упавший вызов стадию не меняет.
+- **Агент.** Хук `SessionStart` сообщает агенту, как отмечать стадию и сводку:
+  ```sh
+  stages/agterm-stage set analysis "разбираю требования из карточки"
+  stages/agterm-stage note "задача 4/7: тесты на парсер"
+  ```
+  Песочница Bash не пускает агента к сокету agterm и в `~/.local/state`, поэтому эту команду
+  применяет хук `PostToolUse`: он видит её в Bash и работает вне песочницы. Сама команда в
+  песочнице завершается с кодом 0. Хук принимает только `set`, `note` и `clear` в начале
+  команды; перенаправления в сводку не попадают, а текст с `$(…)` пропускается.
+
+Побеждает последняя запись. Повторный скил той же стадии (второй `/code-review`) сводку агента
+не стирает.
+
+### Команды
+
+Путь от корня kit, в `PATH` команда не ставится:
+
+```sh
+agterm-stage set <стадия> [сводка]   # analysis|plan|exec|review|mr|done или по-русски: анализ, план…
+agterm-stage note <сводка>           # сводка без смены стадии
+agterm-stage get [--json]            # стадия этой сессии
+agterm-stage clear                   # убрать стадию и строку
+agterm-stage restore                 # вернуть строки в сайдбар после перезапуска agterm
+agterm-stage board                   # открыть доску или перейти к ней
+```
+
+Состояние каждой сессии лежит в `~/.local/state/agterm-kit/stages/<id сессии>.json`: стадия,
+сводка, источник, время начала стадии и история последних 50 переходов. Записи сессий, которых
+нет в agterm дольше 14 дней, удаляются.
+
+### Как устроено
+
+Строка под сессией — это `agtermctl session info --markdown`. Доска — HTML-страница
+`stages/board.html` с `--js` поверх отдельной сессии «Доска»: она читает `agterm.request('tree')`
+и берёт из строк info стадию и сводку, поэтому своего сервера и файла данных у неё нет.
+agterm не хранит строки info после перезапуска, их возвращают хук `SessionStart` и сессия доски,
+которая раз в минуту вызывает `restore`. Сессия доски закреплена через `session restore`,
+поэтому после перезапуска поднимается снова. Закрыли страницу — Enter в сессии доски
+открывает её заново.
+
+Открыть `stages/board.html` в браузере вне agterm: страница покажет демо-данные.
+
+Установка: `make install-gui` (хуки Claude Code и клавиша). После неё нужна новая сессия
+Claude Code и `agtermctl keymap reload`. Хук всегда завершается с кодом 0, а в настройках
+записан с `|| true`: сбой или переезд kit не мешает агенту вызывать инструменты. Работает только с Claude Code: у Codex и OpenCode
+нет хуков на скилы.
+
 ## lb-limits
 
 Claude Code ходит через балансер agent-lb, а встроенные виджеты ccstatusline (`session-usage`,
@@ -399,7 +471,7 @@ cut -f2,3 ~/.local/state/agterm-kit/ask.log | sort | uniq -c
 ## Разработка
 
 ```sh
-make test     # bats: wt, ask, lb-limits и install.sh с поддельными agtermctl и agent-lb
+make test     # bats: wt, ask, stages, lb-limits и install.sh с поддельными agtermctl и agent-lb
 make lint     # zsh -n и shellcheck
 make hooks    # pre-commit: lint и тесты перед каждым коммитом
 make eval     # платный eval ask на настоящих Codex и OpenCode, нужен agterm
@@ -427,6 +499,8 @@ ask/agterm-ask-mcp   MCP-сервер с ask_user для Codex и OpenCode
 ask/ask.html         шаблон страницы с вопросами
 ask/ask.conf.example образец конфига ask
 lb-limits/lb-limits  лимиты пула agent-lb для ccstatusline
+stages/agterm-stage  стадии работы: команда, хук Claude Code, доска
+stages/board.html    канбан-доска сессий по стадиям
 install.sh           установка симлинка, конфигов, хука и MCP-серверов
 evals/               платные evals на настоящих агентах
 tests/               bats-тесты

@@ -88,6 +88,7 @@ def keymap_body() -> str:
         ("Claude Resume", "", "resume"),
         ("Выбрать каталог", "", "directory"),
         ("Новый компаньон", "", "companion"),
+        ("Доска стадий", "ctrl+shift+k", "board"),
     ]
     return "\n".join(f'command "{name}" {chord} --error-hud {python} {runner} {action}' for name, chord, action in commands)
 
@@ -120,14 +121,24 @@ def migrate_keymap(text: str) -> str:
 
 def hook_settings(original: dict) -> dict:
     hooks = original.setdefault("hooks", {})
-    commands = {
-        "UserPromptSubmit": ("context", ""),
-        "PostToolUse": ("finish-arm", "Bash"),
-        "Stop": ("finish-offer", ""),
-    }
-    runner = f"{shlex.quote(shutil.which('python3') or 'python3')} {shlex.quote(str(HERE / 'run.py'))}"
-    for event, (action, matcher) in commands.items():
-        cmd = f"{runner} {action}"
+    python = shlex.quote(shutil.which("python3") or "python3")
+    runner = f"{python} {shlex.quote(str(HERE / 'run.py'))}"
+    # `|| true`: если kit переехал и скрипта нет, python завершится с кодом 2, а код 2
+    # в PreToolUse запретил бы агенту каждый вызов Skill.
+    stage = f"{python} {shlex.quote(str(HERE.parent / 'stages/agterm-stage'))} hook || true"
+    # Стадии работы (stages/): скилы в PreToolUse, успешные команды Bash (явная команда
+    # агента, glab mr create/merge) в PostToolUse, слэш-команды в UserPromptSubmit,
+    # инструкция агенту и возврат строки в сайдбар в SessionStart.
+    commands = [
+        ("UserPromptSubmit", f"{runner} context", ""),
+        ("PostToolUse", f"{runner} finish-arm", "Bash"),
+        ("Stop", f"{runner} finish-offer", ""),
+        ("PreToolUse", stage, "Skill"),
+        ("PostToolUse", stage, "Bash"),
+        ("UserPromptSubmit", stage, ""),
+        ("SessionStart", stage, ""),
+    ]
+    for event, cmd, matcher in commands:
         # Удаляем лишь прежние записи нашего runner с этим действием.
         groups = []
         for group in hooks.get(event, []):

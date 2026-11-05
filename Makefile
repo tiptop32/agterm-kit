@@ -8,7 +8,7 @@ lint:
 	zsh -n wt/gui-bridge.zsh
 	shellcheck install.sh wt/agterm-worktrees ask/ask-hook.sh ask/agterm-ask ask/agterm-ask-mcp omp/install.sh omp/agterm-status.sh evals/ask-agents.sh evals/ask-session.sh
 	shellcheck -s bash tests/helpers.bash
-	python3 -c 'import ast,pathlib; [ast.parse(p.read_text(),filename=str(p)) for root in ("wt", "workflows", "ask", "themes", "evals") for p in pathlib.Path(root).rglob("*.py")]; ast.parse(pathlib.Path("lb-limits/lb-limits").read_text())'
+	python3 -c 'import ast,pathlib; [ast.parse(p.read_text(),filename=str(p)) for root in ("wt", "workflows", "ask", "themes", "evals") for p in pathlib.Path(root).rglob("*.py")]; [ast.parse(pathlib.Path(p).read_text(),filename=p) for p in ("lb-limits/lb-limits", "stages/agterm-stage")]'
 
 hooks:
 	pre-commit install

@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""agterm-stage: стадия работы агента в сессии agterm и доска по всем сессиям.
+
+  agterm-stage set <стадия> [сводка]   стадия и строка «что сейчас происходит»
+  agterm-stage note <сводка>           новая сводка, стадия прежняя
+  agterm-stage get [--json]            текущая стадия сессии
+  agterm-stage clear                   убрать стадию сессии
+  agterm-stage hook                    Claude Code hook: стадия по скилам и командам
+  agterm-stage restore                 вернуть строки в сайдбар после перезапуска agterm
+  agterm-stage board                   открыть доску (или перейти к ней)
+
+Стадии: analysis (анализ), plan (план), exec (выполнение), review (ревью), mr, done (готово).
+Сессия берётся из AGTERM_SESSION_ID. Состояние: ~/.local/state/agterm-kit/stages/<id>.json,
+в сайдбаре это строка info под сессией: её читает и доска.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import select
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SELF = str(Path(__file__).resolve())
+
+# id, подпись, значок, цвет info-строки agterm (red|orange|yellow|green|blue|purple|gray).
+STAGES = [
+    ("analysis", "Анализ", "◇", "purple"),
+    ("plan", "План", "◈", "blue"),
+    ("exec", "Выполнение", "▶", "orange"),
+    ("review", "Ревью", "◎", "yellow"),
+    ("mr", "MR", "⇅", "green"),
+    ("done", "Готово", "✓", "gray"),
+]
+BY_ID = {s[0]: s for s in STAGES}
+ALIASES = {
+    "анализ": "analysis", "requirements": "analysis", "требования": "analysis",
+    "план": "plan", "planning": "plan", "планирование": "plan",
+    "выполнение": "exec", "execute": "exec", "execution": "exec", "implement": "exec", "реализация": "exec",
+    "ревью": "review",
+    "мр": "mr", "pr": "mr",
+    "готово": "done", "finished": "done",
+}
+
+# Скил → стадия. Имя сверяется целиком, затем без префикса плагина («planning:make» → «make»
+# не сверяется, только полное имя или имя без плагина из этого списка).
+SKILLS = {
+    "analysis": ["brainstorm:brainstorm", "brainstorm", "mattpocock-skills:grilling", "mattpocock-skills:research",
+                 "mattpocock-skills:diagnosing-bugs", "mattpocock-skills:domain-modeling", "kaiten", "allure-triage"],
+    "plan": ["planning:make"],
+    "exec": ["planning:exec", "plan-dispatch", "mattpocock-skills:tdd"],
+    "review": ["review-refactor", "code-review", "mattpocock-skills:code-review", "gpt-review", "simplify",
+               "security-review", "plannotator-review"],
+    "mr": ["gitlab-mr", "mattpocock-skills:pr"],
+}
+SKILL_STAGE = {name: stage for stage, names in SKILLS.items() for name in names}
+# Команды оболочки, которые однозначно говорят о стадии.
+BASH_RULES = [
+    (re.compile(r"\b(glab\s+mr|gh\s+pr)\s+merge\b"), "done", "MR влит"),
+    (re.compile(r"\bglab\s+mr\s+create\b|\bgh\s+pr\s+create\b"), "mr", "MR создан"),
+]
+SUMMARY_MAX = 140
+INFO_MAX_BYTES = 512
+HISTORY_MAX = 50
+STALE_DAYS = 14
+BOARD_NAME = "Доска"
+
+
+class Usage(Exception):
+    pass
+
+
+# --- состояние --------------------------------------------------------------------------
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agterm-kit" / "stages"
+
+
+def session_id() -> str:
+    return os.environ.get("AGTERM_SESSION_ID", "").strip().upper()
+
+
+def state_path(sid: str) -> Path:
+    if not re.fullmatch(r"[0-9A-F-]{4,64}", sid):
+        raise Usage(f"неверный id сессии: {sid!r}")
+    return state_dir() / f"{sid}.json"
+
+
+def load(sid: str) -> dict | None:
+    try:
+        data = json.loads(state_path(sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("stage") in BY_ID else None
+
+
+def save(sid: str, data: dict) -> None:
+    path = state_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def normalize_stage(word: str) -> str:
+    key = word.strip().lower()
+    stage = key if key in BY_ID else ALIASES.get(key, "")
+    if not stage:
+        raise Usage(f"неизвестная стадия {word!r}: {', '.join(BY_ID)}")
+    return stage
+
+
+def clean_summary(text: str) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= SUMMARY_MAX else text[: SUMMARY_MAX - 1].rstrip() + "…"
+
+
+def update(sid: str, stage: str | None, summary: str | None, source: str) -> dict:
+    """Записать стадию и/или сводку. Последняя запись побеждает: и хук, и агент."""
+    old = load(sid) or {}
+    now = time.time()
+    data = {
+        "session": sid,
+        "stage": stage or old.get("stage") or "analysis",
+        "summary": clean_summary(summary) if summary is not None else old.get("summary", ""),
+        "source": source,
+        "since": old.get("since", now) if (stage or old.get("stage")) == old.get("stage") else now,
+        "updatedAt": now,
+        "cwd": os.environ.get("PWD", os.getcwd()),
+        "history": list(old.get("history", [])),
+    }
+    last = data["history"][-1] if data["history"] else {}
+    if (last.get("stage"), last.get("summary")) != (data["stage"], data["summary"]):
+        data["history"].append({"stage": data["stage"], "summary": data["summary"], "source": source, "at": now})
+        data["history"] = data["history"][-HISTORY_MAX:]
+    save(sid, data)
+    return data
+
+
+# --- agterm -------------------------------------------------------------------------------
+
+
+def agtermctl(*args: str, timeout: float = 5) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run([os.environ.get("AGTERMCTL", "agtermctl"), *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def escape_md(text: str) -> str:
+    return re.sub(r"([\\*_`\[\]^~])", r"\\\1", text)
+
+
+def info_text(data: dict) -> str:
+    """Строка под сессией: цветной значок и стадия, затем сводка. Доска разбирает тот же формат."""
+    _, label, glyph, color = BY_ID[data["stage"]]
+    line = f'^[{glyph} {label}](color: "{color}")'
+    summary = data.get("summary") or ""
+    # agterm принимает строку info не длиннее 512 байт UTF-8: режем сводку по байтам.
+    while summary and len((line + " · " + escape_md(summary)).encode()) > INFO_MAX_BYTES:
+        summary = summary[:-2].rstrip() + "…"
+    if summary:
+        line += " · " + escape_md(summary)
+    return line
+
+
+def push(sid: str, data: dict | None) -> bool:
+    args = ["session", "info", "--clear"] if data is None else ["session", "info", "--markdown", info_text(data)]
+    result = agtermctl(*args, "--target", sid)
+    return bool(result and result.returncode == 0)
+
+
+def tree_sessions() -> dict[str, dict]:
+    result = agtermctl("tree", "--json")
+    if not result or result.returncode:
+        return {}
+    try:
+        tree = json.loads(result.stdout)["result"]["tree"]
+    except (ValueError, KeyError, TypeError):
+        return {}
+    return {s["id"].upper(): {**s, "workspace": w.get("name", "")}
+            for w in tree.get("workspaces", []) for s in w.get("sessions", []) if s.get("id")}
+
+
+def restore_all() -> int:
+    """Вернуть строки info, которые agterm потерял при перезапуске; убрать старые записи."""
+    sessions = tree_sessions()
+    restored = 0
+    for path in sorted(state_dir().glob("*.json")):
+        sid = path.stem
+        data = load(sid)
+        if data is None:
+            continue
+        if sid not in sessions:
+            if sessions and time.time() - float(data.get("updatedAt", 0)) > STALE_DAYS * 86400:
+                path.unlink(missing_ok=True)
+            continue
+        if sessions[sid].get("info") != info_text(data) and push(sid, data):
+            restored += 1
+    return restored
+
+
+# --- хук Claude Code ------------------------------------------------------------------
+
+
+def instruction() -> str:
+    cmd = shlex.quote(SELF)
+    return (
+        "agterm-kit, стадии работы. Задача в этой сессии идёт по стадиям: analysis (анализ и разбор "
+        "требований), plan, exec (выполнение плана), review, mr (MR и разбор замечаний), done. "
+        f"В начале задачи и при переходе на новую стадию выполни `{cmd} set <стадия> \"<что делаешь, до 80 "
+        f"символов>\"`, при заметной смене шага внутри стадии `{cmd} note \"<…>\"`. Пиши её отдельной "
+        "командой, без `$(…)` в тексте. Скилы planning, review и gitlab-mr переключают стадию сами, после "
+        "них обнови сводку через note. Команду применяет хук после её выполнения, поэтому в песочнице она "
+        "тоже работает."
+    )
+
+
+EXPLICIT = {"set", "note", "clear"}
+
+
+def explicit_from_bash(command: str) -> list[str] | None:
+    """Аргументы `agterm-stage set|note|clear …` из команды Bash агента.
+
+    Учитывается только вызов в начале простой команды (не `grep agterm-stage README`,
+    не `echo agterm-stage …`). Перенаправления (`>/dev/null 2>&1`) и всё после `;`, `&&`,
+    `|` и перевода строки в сводку не попадают. Подстановки `$…` и обратные кавычки хук
+    раскрыть не может, такая команда пропускается целиком.
+    """
+    if "agterm-stage" not in command:
+        return None
+    for line in command.splitlines():
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>")
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            continue
+        start = True
+        for i, token in enumerate(tokens):
+            if token and set(token) <= set(";&|"):
+                start = True
+                continue
+            if start and os.path.basename(token) == "agterm-stage":
+                args: list[str] = []
+                for arg, nxt in zip(tokens[i + 1:], tokens[i + 2:] + [""]):
+                    if (arg and set(arg) <= set(";&|<>")) or (arg.isdigit() and nxt[:1] in "<>" and nxt):
+                        break
+                    args.append(arg)
+                if not args or args[0] not in EXPLICIT or any("$" in a or "`" in a for a in args):
+                    return None
+                return args
+            start = False
+    return None
+
+
+def auto_stage(payload: dict) -> tuple[str, str, str] | None:
+    """(стадия, сводка, источник) по событию хука, если событие говорит о стадии."""
+    event = payload.get("hook_event_name")
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    skill = ""
+    if event == "UserPromptSubmit":
+        match = re.match(r"\s*/([\w:.-]+)", str(payload.get("prompt") or ""))
+        skill = match.group(1) if match else ""
+    elif event == "PreToolUse" and payload.get("tool_name") == "Skill":
+        skill = str(tool_input.get("skill") or "").lstrip("/")
+    elif event == "PostToolUse" and payload.get("tool_name") == "Bash":
+        command = str(tool_input.get("command") or "")
+        for pattern, stage, summary in BASH_RULES:
+            if pattern.search(command):
+                return stage, summary, "bash"
+        return None
+    stage = SKILL_STAGE.get(skill)
+    return (stage, f"/{skill}", f"skill:{skill}") if stage else None
+
+
+def hook() -> int:
+    """Хук Claude Code. Всегда код 0 и ничего лишнего в stdout: код 2 в PreToolUse
+    запретил бы агенту вызов инструмента, а stdout Claude Code читает как ответ хука."""
+    try:
+        return _hook()
+    except Exception as exc:  # noqa: BLE001 -- хук не должен ломать Claude Code ни при какой ошибке
+        print(f"agterm-stage hook: {exc}", file=sys.stderr)
+        return 0
+
+
+def _hook() -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return 0
+    sid = session_id()
+    if not sid or not isinstance(payload, dict) or not re.fullmatch(r"[0-9A-F-]{4,64}", sid):
+        return 0
+    event = payload.get("hook_event_name")
+    if not isinstance(payload.get("tool_input"), (dict, type(None))):
+        payload["tool_input"] = {}
+    if event == "SessionStart":
+        data = load(sid)
+        if data:
+            push(sid, data)
+        print(instruction())
+        return 0
+    # Явная команда агента применяется после того, как Bash отработал: отклонённый
+    # пользователем вызов стадию не меняет. В песочнице сама команда завершается с кодом 0.
+    if event == "PostToolUse" and payload.get("tool_name") == "Bash":
+        args = explicit_from_bash(str((payload.get("tool_input") or {}).get("command") or ""))
+        if args:
+            try:
+                run_command(args, sid, source="agent")
+            except (Usage, OSError):
+                pass
+            return 0
+    found = auto_stage(payload)
+    if found:
+        stage, summary, source = found
+        current = load(sid)
+        # Тот же этап повторно (второй /code-review) не стирает сводку, которую написал агент.
+        if not current or current["stage"] != stage:
+            push(sid, update(sid, stage, summary, source))
+    return 0
+
+
+# --- доска ---------------------------------------------------------------------------------
+
+
+def board_file() -> Path:
+    return state_dir().parent / "board.json"
+
+
+def open_board_overlay(sid: str) -> bool:
+    result = agtermctl("session", "overlay", "open", "--html", str(HERE / "board.html"), "--js", "--chromeless",
+                       "--target", sid)
+    return bool(result and result.returncode == 0)
+
+
+def board() -> int:
+    """Перейти к сессии с доской; нет её: создать. Внутри сессии крутится board-host."""
+    restore_all()
+    sessions = tree_sessions()
+    try:
+        host = json.loads(board_file().read_text()).get("session", "").upper()
+    except (OSError, ValueError, AttributeError):
+        host = ""
+    if host and host in sessions:
+        if not sessions[host].get("overlay"):
+            open_board_overlay(host)
+        agtermctl("session", "select", "--target", host)
+        return 0
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(SELF)} board-host"
+    result = agtermctl("session", "new", "--name", BOARD_NAME, "--command", command, "--json")
+    if not result or result.returncode:
+        print(f"agterm-stage: не создать сессию доски: {(result.stderr if result else '').strip()}", file=sys.stderr)
+        return 1
+    try:
+        host = json.loads(result.stdout)["result"]["id"].upper()
+    except (ValueError, KeyError, TypeError, AttributeError):
+        print("agterm-stage: agtermctl не вернул id сессии доски", file=sys.stderr)
+        return 1
+    board_file().parent.mkdir(parents=True, exist_ok=True)
+    board_file().write_text(json.dumps({"session": host}))
+    agtermctl("session", "select", "--target", host)
+    return 0
+
+
+def board_host() -> int:
+    """Процесс сессии доски: открывает страницу поверх себя и раз в минуту чинит строки info."""
+    sid = session_id()
+    if not sid:
+        print("agterm-stage: board-host запускается внутри сессии agterm", file=sys.stderr)
+        return 1
+    agtermctl("session", "restore", f"{shlex.quote(sys.executable)} {shlex.quote(SELF)} board-host", "--target", sid)
+    board_file().parent.mkdir(parents=True, exist_ok=True)
+    board_file().write_text(json.dumps({"session": sid}))
+    restore_all()
+    open_board_overlay(sid)
+    print("Доска стадий. Закрыли страницу: нажмите Enter, чтобы открыть её снова.")
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], 60)
+        if ready:
+            if not sys.stdin.readline():
+                return 0
+            open_board_overlay(sid)
+        restore_all()
+
+
+# --- команды ---------------------------------------------------------------------------
+
+
+def run_command(args: list[str], sid: str, source: str = "agent") -> int:
+    if not args:
+        raise Usage("ожидается команда: set, note, get, clear, hook, restore, board")
+    command, rest = args[0], args[1:]
+    if command == "set":
+        if not rest:
+            raise Usage("set <стадия> [сводка]")
+        data = update(sid, normalize_stage(rest[0]), " ".join(rest[1:]), source)
+        push(sid, data)
+        return 0
+    if command == "note":
+        if not rest:
+            raise Usage("note <сводка>")
+        data = update(sid, None, " ".join(rest), source)
+        push(sid, data)
+        return 0
+    if command == "clear":
+        state_path(sid).unlink(missing_ok=True)
+        push(sid, None)
+        return 0
+    if command == "get":
+        data = load(sid)
+        if "--json" in rest:
+            print(json.dumps(data or {}, ensure_ascii=False))
+        elif data:
+            print(f"{BY_ID[data['stage']][1]}" + (f" · {data['summary']}" if data.get("summary") else ""))
+        return 0
+    raise Usage(f"неизвестная команда {command!r}")
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    command = args[0] if args else ""
+    if command == "hook":
+        return hook()
+    if command == "restore":
+        print(restore_all())
+        return 0
+    if command == "board":
+        return board()
+    if command == "board-host":
+        return board_host()
+    sid = session_id()
+    if not sid and command in ("set", "note", "clear", "get"):
+        print("agterm-stage: нет AGTERM_SESSION_ID, запускайте внутри сессии agterm", file=sys.stderr)
+        return 1
+    try:
+        return run_command(args, sid)
+    except OSError:
+        # Песочница агента не пускает в ~/.local/state и к сокету agterm. Ту же команду
+        # уже применил хук PreToolUse, который работает вне песочницы.
+        print("agterm-stage: записать не удалось, команду применяет хук Claude Code", file=sys.stderr)
+        return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Usage as exc:
+        print(f"agterm-stage: {exc}", file=sys.stderr)
+        sys.exit(2)

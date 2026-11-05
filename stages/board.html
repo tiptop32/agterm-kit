@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Доска · agterm</title>
+<style>
+:root{
+  --bg:var(--agterm-background,#0d1014);
+  --fg:var(--agterm-foreground,#e6e9ef);
+  --muted:color-mix(in oklab,var(--fg) 52%,transparent);
+  --faint:color-mix(in oklab,var(--fg) 30%,transparent);
+  --line:color-mix(in oklab,var(--fg) 9%,transparent);
+  --panel:color-mix(in oklab,var(--fg) 3.5%,var(--bg));
+  --card:color-mix(in oklab,var(--fg) 6%,var(--bg));
+  --card-hover:color-mix(in oklab,var(--fg) 9%,var(--bg));
+  --analysis:#a78bfa;--plan:#60a5fa;--exec:#fb923c;--review:#facc15;--mr:#4ade80;--done:#94a3b8;
+  --amber:#f59e0b;--green:#34d399;
+  --radius:14px;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;
+  --mono:"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1200px 600px at 8% -10%,color-mix(in oklab,var(--analysis) 12%,transparent),transparent 60%),
+    radial-gradient(900px 500px at 100% 0%,color-mix(in oklab,var(--plan) 10%,transparent),transparent 55%),
+    var(--bg);
+  color:var(--fg);font:13px/1.45 var(--sans);-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+header{display:flex;align-items:center;gap:14px;padding:18px 22px 10px}
+.mark{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex:none;
+  background:conic-gradient(from 210deg,var(--analysis),var(--plan),var(--exec),var(--review),var(--mr),var(--analysis));
+  box-shadow:0 6px 22px -6px color-mix(in oklab,var(--plan) 70%,transparent)}
+.mark::after{content:"";width:12px;height:12px;border-radius:4px;background:var(--bg)}
+h1{font-size:17px;font-weight:650;letter-spacing:-.01em;margin:0}
+.sub{color:var(--muted);font-size:12.5px}
+.sub b{color:var(--fg);font-weight:600}
+.attn{display:none;align-items:center;gap:6px;padding:3px 10px 3px 8px;border-radius:999px;font-size:12px;font-weight:600;
+  color:var(--amber);background:color-mix(in oklab,var(--amber) 14%,transparent);border:1px solid color-mix(in oklab,var(--amber) 35%,transparent);cursor:pointer}
+.attn.on{display:inline-flex}
+.attn i{width:7px;height:7px;border-radius:50%;background:var(--amber);animation:pulse 1.4s ease-in-out infinite}
+.spacer{flex:1}
+.search{display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;width:240px;border-radius:10px;
+  background:var(--panel);border:1px solid var(--line);transition:border-color .15s,box-shadow .15s}
+.search:focus-within{border-color:color-mix(in oklab,var(--plan) 60%,transparent);box-shadow:0 0 0 3px color-mix(in oklab,var(--plan) 18%,transparent)}
+.search svg{flex:none;opacity:.55}
+.search input{all:unset;flex:1;font-size:12.5px;color:var(--fg)}
+.search input::placeholder{color:var(--faint)}
+kbd{font:500 10.5px var(--mono);color:var(--muted);padding:1px 5px;border-radius:5px;border:1px solid var(--line);background:var(--panel)}
+.live{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11.5px}
+.live i{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+.live.err i{background:#f87171;box-shadow:0 0 8px #f87171}
+
+.flow{display:flex;gap:6px;padding:2px 22px 14px;color:var(--faint);font-size:11.5px;align-items:center}
+.flow span{display:inline-flex;align-items:center;gap:5px}
+.flow span::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--c)}
+.flow em{font-style:normal;opacity:.5}
+
+main{flex:1;display:grid;grid-template-columns:repeat(6,minmax(220px,1fr));gap:12px;padding:0 22px 14px;overflow:auto;min-height:0}
+.col{display:flex;flex-direction:column;min-height:0;border-radius:var(--radius);background:var(--panel);
+  border:1px solid var(--line);position:relative;overflow:hidden}
+.col::before{content:"";position:absolute;inset:0 0 auto;height:2px;background:linear-gradient(90deg,var(--c),color-mix(in oklab,var(--c) 10%,transparent))}
+.col-h{display:flex;align-items:center;gap:9px;padding:13px 13px 10px}
+.glyph{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;font-size:12px;flex:none;
+  color:var(--c);background:color-mix(in oklab,var(--c) 15%,transparent);border:1px solid color-mix(in oklab,var(--c) 30%,transparent)}
+.col-h h2{margin:0;font-size:13px;font-weight:620;letter-spacing:-.005em}
+.count{margin-left:auto;min-width:22px;text-align:center;padding:1px 7px;border-radius:999px;font:600 11px var(--mono);
+  color:var(--muted);background:color-mix(in oklab,var(--fg) 6%,transparent)}
+.col.has .count{color:var(--c);background:color-mix(in oklab,var(--c) 14%,transparent)}
+.cards{flex:1;overflow-y:auto;padding:2px 9px 10px;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin}
+.empty{margin:4px 2px;padding:18px 0;text-align:center;color:var(--faint);font-size:12px;border:1px dashed var(--line);border-radius:11px}
+
+.card{position:relative;padding:11px 12px 10px 14px;border-radius:11px;background:var(--card);border:1px solid var(--line);
+  cursor:pointer;transition:transform .14s ease,background .14s,border-color .14s,box-shadow .14s;outline:none}
+.card::before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:0 3px 3px 0;background:var(--c);opacity:.85}
+.card:hover,.card:focus-visible{background:var(--card-hover);transform:translateY(-1px);border-color:color-mix(in oklab,var(--c) 40%,transparent);
+  box-shadow:0 10px 28px -14px color-mix(in oklab,var(--c) 60%,transparent)}
+.card.new{animation:enter .32s cubic-bezier(.2,.8,.2,1)}
+.card.blocked{border-color:color-mix(in oklab,var(--amber) 55%,transparent);box-shadow:0 0 0 1px color-mix(in oklab,var(--amber) 25%,transparent),0 8px 26px -12px color-mix(in oklab,var(--amber) 60%,transparent)}
+.card.current{outline:1.5px solid color-mix(in oklab,var(--fg) 35%,transparent);outline-offset:2px}
+.col[data-stage=done] .card{opacity:.62}
+.col[data-stage=done] .card:hover{opacity:1}
+.top{display:flex;align-items:center;gap:7px;min-width:0}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint)}
+.dot.active{background:var(--green);box-shadow:0 0 0 0 color-mix(in oklab,var(--green) 60%,transparent);animation:ring 1.8s ease-out infinite}
+.dot.blocked{background:var(--amber);animation:pulse 1.2s ease-in-out infinite}
+.dot.completed{background:var(--plan)}
+.name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.badge{margin-left:auto;flex:none;font-size:10.5px;font-weight:650;letter-spacing:.02em;text-transform:uppercase;padding:2px 7px;border-radius:6px;
+  color:var(--amber);background:color-mix(in oklab,var(--amber) 15%,transparent)}
+.summary{margin:6px 0 9px;color:color-mix(in oklab,var(--fg) 82%,transparent);font-size:12.5px;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.summary.none{color:var(--faint);font-style:italic}
+.meta{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);min-width:0}
+.chip{padding:1px 7px;border-radius:6px;background:color-mix(in oklab,var(--fg) 6%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0;max-width:62%}
+.path{font-family:var(--mono);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;color:var(--faint)}
+.age{margin-left:auto;flex:none;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+
+footer{display:flex;gap:18px;padding:0 22px 14px;color:var(--faint);font-size:11.5px}
+footer span{display:inline-flex;gap:6px;align-items:center}
+
+.hello{grid-column:1/-1;align-self:center;justify-self:center;max-width:520px;text-align:center;color:var(--muted);padding:40px 0}
+.hello h3{color:var(--fg);font-size:16px;margin:0 0 8px}
+.hello code{font:12px var(--mono);padding:2px 6px;border-radius:6px;background:var(--panel);border:1px solid var(--line);color:var(--fg)}
+
+@keyframes enter{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:none}}
+@keyframes pulse{50%{opacity:.35}}
+@keyframes ring{0%{box-shadow:0 0 0 0 color-mix(in oklab,var(--green) 55%,transparent)}100%{box-shadow:0 0 0 7px transparent}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (max-width:1240px){main{grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:minmax(0,1fr)}}
+@media (max-width:720px){main{grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(240px,1fr)}.search{width:150px}footer{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <div class="mark" aria-hidden="true"></div>
+  <div>
+    <h1>Доска</h1>
+    <div class="sub" id="sub">Загружаю сессии…</div>
+  </div>
+  <button class="attn" id="attn" type="button" title="Перейти к первой сессии, которая ждёт ответа"><i></i><span></span></button>
+  <div class="spacer"></div>
+  <label class="search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input id="q" placeholder="Сессия, сводка, проект" autocomplete="off" spellcheck="false">
+    <kbd>/</kbd>
+  </label>
+  <div class="live" id="live"><i></i><span>live</span></div>
+</header>
+<nav class="flow" id="flow"></nav>
+<main id="board"></main>
+<footer>
+  <span><kbd>клик</kbd> перейти к сессии</span>
+  <span><kbd>/</kbd> поиск</span>
+  <span><kbd>Esc</kbd> очистить</span>
+  <span>стадию ставят скилы и агент: <kbd>stages/agterm-stage set</kbd></span>
+</footer>
+<script>
+// parse:begin
+const STAGES = [
+  {id: "analysis", label: "Анализ", glyph: "◇", hint: "разбор требований"},
+  {id: "plan", label: "План", glyph: "◈", hint: "решение и шаги"},
+  {id: "exec", label: "Выполнение", glyph: "▶", hint: "по плану"},
+  {id: "review", label: "Ревью", glyph: "◎", hint: "проверка"},
+  {id: "mr", label: "MR", glyph: "⇅", hint: "замечания"},
+  {id: "done", label: "Готово", glyph: "✓", hint: "завершено"},
+];
+// Формат строки info, которую пишет agterm-stage: ^[◈ План](color: "blue") · сводка
+function parseInfo(info) {
+  const m = /^\^\[(\S+) ([^\]]+)\]\(color: "\w+"\)(?: · ([\s\S]*))?$/.exec(info || "");
+  if (!m) return null;
+  const stage = STAGES.find(s => s.glyph === m[1] && s.label === m[2]);
+  if (!stage) return null;
+  return {stage: stage.id, summary: (m[3] || "").replace(/\\([\\*_`\[\]^~])/g, "$1")};
+}
+// parse:end
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const seen = new Set();
+let cards = [], query = "", failed = false, drawn = "";
+
+function ago(seconds) {
+  if (!seconds) return "";
+  const s = Math.max(0, Date.now() / 1000 - seconds);
+  if (s < 60) return "сейчас";
+  if (s < 3600) return `${Math.floor(s / 60)} мин`;
+  if (s < 86400) return `${Math.floor(s / 3600)} ч`;
+  return `${Math.floor(s / 86400)} д`;
+}
+const home = p => (p || "").replace(/^\/Users\/[^/]+/, "~");
+const leaf = p => (p || "").split("/").filter(Boolean).pop() || "";
+
+function collect(tree) {
+  const out = [];
+  for (const w of tree.workspaces || []) for (const s of w.sessions || []) {
+    const parsed = parseInfo(s.info);
+    if (parsed) out.push({...parsed, id: s.id, name: s.name || s.title || "сессия", workspace: w.name || "",
+      cwd: s.cwd || "", status: s.status || "idle", changed: s.statusChangedAt || 0, current: !!s.active});
+  }
+  return out;
+}
+
+function render(force) {
+  const q = query.trim().toLowerCase();
+  // Без изменений не перерисовываем: так не мигает hover и не теряется фокус.
+  const sig = JSON.stringify([cards, q, Math.floor(Date.now() / 30000)]);
+  if (!force && sig === drawn) return;
+  drawn = sig;
+  const focused = document.activeElement?.closest?.(".card")?.dataset.id;
+  const shown = cards.filter(c => !q || [c.name, c.summary, c.workspace, c.cwd].join(" ").toLowerCase().includes(q));
+  const blocked = cards.filter(c => c.status === "blocked");
+  const active = cards.filter(c => c.status === "active").length;
+  $("sub").innerHTML = cards.length
+    ? `<b>${cards.length}</b> ${plural(cards.length, "сессия", "сессии", "сессий")} в работе · <b>${active}</b> активны`
+    : "Нет сессий со стадией";
+  $("attn").classList.toggle("on", blocked.length > 0);
+  $("attn").querySelector("span").textContent = `${blocked.length} ${plural(blocked.length, "ждёт", "ждут", "ждут")} вас`;
+  $("attn").onclick = () => blocked[0] && go(blocked[0].id);
+
+  if (!cards.length) {
+    $("board").innerHTML = `<div class="hello"><h3>Пока пусто</h3>Сессии появятся здесь, когда агент отметит стадию:
+      <code>stages/agterm-stage set analysis "разбираю требования"</code>. Скилы planning, review и gitlab-mr ставят её сами.</div>`;
+    return;
+  }
+  $("board").innerHTML = STAGES.map(st => {
+    const list = shown.filter(c => c.stage === st.id).sort((a, b) => (b.status === "blocked") - (a.status === "blocked") || b.changed - a.changed);
+    const body = list.length ? list.map(card).join("") : `<div class="empty">${q ? "ничего не найдено" : "пусто"}</div>`;
+    return `<section class="col ${list.length ? "has" : ""}" data-stage="${st.id}" style="--c:var(--${st.id})">
+      <div class="col-h"><span class="glyph">${st.glyph}</span><h2>${st.label}</h2><span class="count">${list.length}</span></div>
+      <div class="cards">${body}</div></section>`;
+  }).join("");
+  for (const c of cards) seen.add(c.id);
+  if (focused) document.querySelector(`.card[data-id="${CSS.escape(focused)}"]`)?.focus();
+}
+
+function card(c) {
+  const fresh = !seen.has(c.id);
+  return `<article class="card ${fresh ? "new" : ""} ${c.status === "blocked" ? "blocked" : ""} ${c.current ? "current" : ""}"
+      tabindex="0" data-id="${esc(c.id)}" title="${esc(c.name)}">
+    <div class="top"><span class="dot ${esc(c.status)}"></span><span class="name">${esc(c.name)}</span>
+      ${c.status === "blocked" ? '<span class="badge">ждёт</span>' : ""}</div>
+    <div class="summary ${c.summary ? "" : "none"}">${esc(c.summary || "без сводки")}</div>
+    <div class="meta" title="${esc(home(c.cwd))}">${c.workspace ? `<span class="chip">${esc(c.workspace)}</span>` : ""}
+      ${leaf(c.cwd) && leaf(c.cwd) !== c.workspace ? `<span class="path">${esc(leaf(c.cwd))}</span>` : ""}<span class="age">${ago(c.changed)}</span></div>
+  </article>`;
+}
+
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+}
+
+async function go(id) {
+  if (window.agterm) { try { await agterm.request("session.select", {target: id}); } catch (e) { flash(e); } }
+}
+function flash(e) { failed = true; $("live").classList.add("err"); $("live").querySelector("span").textContent = String(e.message || e).slice(0, 60); }
+
+async function refresh() {
+  if (document.hidden) return;
+  try {
+    const tree = window.agterm ? await agterm.request("tree") : demo();
+    cards = collect(tree.tree || tree);
+    if (failed) { failed = false; $("live").classList.remove("err"); $("live").querySelector("span").textContent = "live"; }
+    render();
+  } catch (e) { flash(e); }
+}
+
+$("flow").innerHTML = STAGES.map(s => `<span style="--c:var(--${s.id})">${s.label}</span>`).join("<em>→</em>");
+$("board").addEventListener("click", e => { const el = e.target.closest(".card"); if (el) go(el.dataset.id); });
+$("board").addEventListener("keydown", e => { const el = e.target.closest(".card"); if (el && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); go(el.dataset.id); } });
+$("q").addEventListener("input", e => { query = e.target.value; render(true); });
+document.addEventListener("keydown", e => {
+  if (e.key === "/" && document.activeElement !== $("q")) { e.preventDefault(); $("q").focus(); }
+  else if (e.key === "Escape") { $("q").value = query = ""; $("q").blur(); render(true); }
+});
+document.addEventListener("visibilitychange", refresh);
+refresh();
+setInterval(refresh, 2000);
+
+// Вне agterm (файл открыт в браузере) страница показывает демо-данные: так её видно без терминала.
+function demo() {
+  const now = Date.now() / 1000;
+  const s = (name, info, status, min, cwd, active) => ({id: name, name, info, status, statusChangedAt: now - min * 60, cwd, active});
+  return {workspaces: [
+    {name: "cloud-autotests", sessions: [
+      s("SALT-3513838 миграция стенда", '^[◇ Анализ](color: "purple") · сверяю требования из карточки Kaiten с текущими тестами', "active", 2, "/Users/me/worktrees/cloud-autotests/SALT-3513838"),
+      s("SALT-3520114 флаки в smoke", '^[▶ Выполнение](color: "orange") · задача 4/7: стабилизирую ожидания в smoke-наборе', "active", 6, "/Users/me/worktrees/cloud-autotests/SALT-3520114"),
+      s("SALT-3519002 отчёт Allure", '^[⇅ MR](color: "green") · разбираю 3 замечания Copilot Mike', "blocked", 1, "/Users/me/worktrees/cloud-autotests/SALT-3519002"),
+    ]},
+    {name: "agterm-kit", sessions: [
+      s("Доска стадий", '^[◈ План](color: "blue") · план: хук стадий, доска, установка', "completed", 12, "/Users/me/my_git_reps/agterm-kit", true),
+      s("lb-limits", '^[✓ Готово](color: "gray") · лимиты пула в статус-строке', "idle", 95, "/Users/me/my_git_reps/agterm-kit"),
+    ]},
+    {name: "agent-lb", sessions: [
+      s("pace planner", '^[◎ Ревью](color: "yellow") · /review-refactor: GPT-ревью в фоне, \\*simplify\\* готов', "active", 4, "/Users/me/my_git_reps/agent-lb"),
+      s("квоты opus", '^[◇ Анализ](color: "purple")', "idle", 40, "/Users/me/my_git_reps/agent-lb"),
+    ]},
+  ]};
+}
+</script>
+</body>
+</html>
