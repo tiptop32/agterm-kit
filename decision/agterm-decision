@@ -67,6 +67,11 @@ def validate_record(record: object) -> None:
             raise ValueError(f"неверное поле {key}")
     if not re.fullmatch(r"[0-9a-f]{10}", record["id"]) or record["kind"] not in KINDS:
         raise ValueError("неверный id или kind")
+    if record["kind"] in ("answer", "verdict") and not record["ref"]:
+        raise ValueError(f"{record['kind']} без ref")
+    # Вердикт закрывает решение в open, поэтому чужой text не должен его закрыть.
+    if record["kind"] == "verdict" and record["text"] not in VERDICTS:
+        raise ValueError("verdict требует text keep|change|revert")
     timestamp(record)
 
 
@@ -108,9 +113,14 @@ def append_record(directory: Path, repo: str, kind: str, text: str,
     folder = directory / repo
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-    fd = os.open(folder / f"{now:%Y-%m-%d}.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(folder / f"{now:%Y-%m-%d}.jsonl", os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        # Прерванная запись оставляет хвост без LF: без перевода строки новая запись
+        # склеилась бы с ним, и чтение отбросило бы обе.
+        size = os.fstat(fd).st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            payload = b"\n" + payload
         # Один write под замком: ни буферизация, ни параллельный add не дробят строку.
         if os.write(fd, payload) != len(payload):
             raise OSError("неполная запись строки журнала")
@@ -179,6 +189,10 @@ def main() -> int:
         if args.command == "add":
             if not args.prod and (args.text is None or args.why is None):
                 cli.error("add требует --text и --why, либо --prod")
+            if args.prod and args.kind not in ("decision", "question"):
+                cli.error("--prod допустим только для decision и question")
+            if args.kind in ("answer", "verdict") and not args.ref:
+                cli.error(f"{args.kind} требует --ref")
             if not args.prod and args.kind == "verdict" and args.text not in VERDICTS:
                 cli.error("verdict требует --text keep|change|revert")
             emit(append_record(directory, current_repo(), args.kind,
@@ -215,7 +229,7 @@ def main() -> int:
                     continue
             emit(record)
         return 0
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, OverflowError) as exc:
         print(f"agterm-decision: {exc}", file=sys.stderr)
         return 1
 

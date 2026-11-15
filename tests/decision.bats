@@ -337,3 +337,34 @@ PY
     [ "$status" -ne 0 ]
     [ ! -e "$DECISION_LOG_DIR" ]
 }
+
+@test "add after an interrupted line without LF keeps the new record readable" {
+    "$DECISION" add --kind decision --text first --why w > /dev/null
+    printf '{"id":"broken' >> "$(ls "$DECISION_LOG_DIR"/agterm-kit/*.jsonl)"
+    new=$("$DECISION" add --kind decision --text second --why w | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+    run "$DECISION" show "$new"
+    [ "$status" -eq 0 ]
+    [[ $output == *'"text":"second"'* ]]
+}
+
+@test "verdict with unknown text or without ref is skipped and does not close the decision" {
+    seed_log '[{"id":"a000000001"},{"id":"c000000003","kind":"verdict","text":"unknown","ref":"a000000001"},{"id":"d000000004","kind":"answer","text":"x","ref":null}]'
+    run --separate-stderr "$DECISION" open
+    [ "$status" -eq 0 ]
+    assert_ids a000000001
+    [[ $stderr == *"verdict требует text keep|change|revert"* ]]
+    [[ $stderr == *"answer без ref"* ]]
+}
+
+@test "answer and verdict need ref, prod only for decision and question, huge since fails cleanly" {
+    run "$DECISION" add --kind answer --text a --why w
+    [ "$status" -ne 0 ]
+    run "$DECISION" add --kind verdict --text keep --why w
+    [ "$status" -ne 0 ]
+    run "$DECISION" add --kind verdict --prod --ref a000000001
+    [ "$status" -ne 0 ]
+    [ ! -e "$DECISION_LOG_DIR" ]
+    run --separate-stderr "$DECISION" open --since 999999999d
+    [ "$status" -ne 0 ]
+    [[ $stderr != *Traceback* ]]
+}
