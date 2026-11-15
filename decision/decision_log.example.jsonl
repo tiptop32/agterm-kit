@@ -1,0 +1,4 @@
+{"id":"a100000001","ts":"2026-11-15T14:02:11+03:00","repo":"agterm-kit","session":"session-example","source":"claude","task_id":null,"kind":"decision","text":"Выбрать stdlib","why":"Не нужны внешние зависимости","ref":null}
+{"id":"b200000002","ts":"2026-11-15T14:03:11+03:00","repo":"agterm-kit","session":"session-example","source":"claude","task_id":null,"kind":"question","text":"Нужен ли экспорт?","why":"Формат экспорта не задан","ref":null}
+{"id":"c300000003","ts":"2026-11-15T14:04:11+03:00","repo":"agterm-kit","session":"session-example","source":"claude","task_id":null,"kind":"answer","text":"Экспорт не нужен","why":"Достаточно JSONL","ref":"b200000002"}
+{"id":"d400000004","ts":"2026-11-15T14:05:11+03:00","repo":"agterm-kit","session":"session-example","source":"claude","task_id":null,"kind":"verdict","text":"keep","why":"Оставить stdlib","ref":"a100000001"}

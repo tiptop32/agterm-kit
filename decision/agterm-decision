@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Append-only журнал решений и вопросов, Python stdlib.
+
+Все команды печатают JSONL: add/mark/answer возвращают добавленную запись,
+show возвращает исходную запись, list/open выводят свежие записи первыми.
+list и open читают все репозитории; --repo ограничивает выборку.
+--since Nd задаёт возраст записей; у list ограничения нет, у open по умолчанию 14d.
+show/mark/answer ищут префикс во всём журнале, без ограничения по возрасту.
+mark принимает только decision, answer только question; запись идёт в репозиторий
+исходной записи. --session у add имеет приоритет над CLAUDE_CODE_SESSION_ID.
+
+Формат сначала меняется в decision_log.example.jsonl. Хранилище:
+$DECISION_LOG_DIR/<repo>/YYYY-MM-DD.jsonl, по умолчанию ~/.local/state/decisions.
+add --prod не сохраняет text/why: вместо них пишет "(prod)"/null;
+при --prod аргументы --text и --why можно не передавать.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+KINDS = ("decision", "question", "answer", "verdict")
+VERDICTS = ("keep", "change", "revert")
+
+
+def current_repo() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:  # git не установлен: каталог как вне репозитория
+        return Path.cwd().name
+    if result.returncode == 0:
+        return Path(result.stdout.strip()).parent.name
+    return Path.cwd().name
+
+
+def log_dir() -> Path:
+    return Path(os.environ.get("DECISION_LOG_DIR") or Path.home() / ".local/state/decisions")
+
+
+def timestamp(record: dict) -> datetime:
+    moment = datetime.fromisoformat(record["ts"].replace("Z", "+00:00"))
+    if moment.utcoffset() is None:
+        raise ValueError("ts без часового пояса")
+    return moment
+
+
+def validate_record(record: object) -> None:
+    if not isinstance(record, dict):
+        raise ValueError("ожидался JSON-объект")
+    for key in ("id", "ts", "repo", "source", "kind", "text"):
+        if not isinstance(record.get(key), str):
+            raise ValueError(f"неверное поле {key}")
+    for key in ("session", "task_id", "why", "ref"):
+        if key not in record or (record[key] is not None and not isinstance(record[key], str)):
+            raise ValueError(f"неверное поле {key}")
+    if not re.fullmatch(r"[0-9a-f]{10}", record["id"]) or record["kind"] not in KINDS:
+        raise ValueError("неверный id или kind")
+    timestamp(record)
+
+
+def read_records(directory: Path) -> list[dict]:
+    records = []
+    for path in sorted(directory.glob("*/*.jsonl")):
+        # Общий замок не даёт читателю увидеть незавершённую запись писателя.
+        with path.open("rb") as stream:
+            fcntl.flock(stream, fcntl.LOCK_SH)
+            for number, line in enumerate(stream, 1):
+                try:
+                    record = json.loads(line)
+                    validate_record(record)
+                except (ValueError, UnicodeError) as exc:
+                    print(f"agterm-decision: предупреждение: {path}:{number}: {exc}", file=sys.stderr)
+                    continue
+                records.append(record)
+    return sorted(records, key=timestamp, reverse=True)
+
+
+def append_record(directory: Path, repo: str, kind: str, text: str,
+                  why: str | None, ref: str | None = None,
+                  session: str | None = None) -> dict:
+    if not repo or repo in (".", "..") or Path(repo).name != repo:
+        raise ValueError(f"неверное имя репозитория: {repo!r}")
+    now = datetime.now().astimezone()
+    record = {
+        "id": secrets.token_hex(5),
+        "ts": now.isoformat(),
+        "repo": repo,
+        "session": session if session is not None else os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        "source": "claude",
+        "task_id": None,
+        "kind": kind,
+        "text": text,
+        "why": why,
+        "ref": ref,
+    }
+    folder = directory / repo
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(folder / f"{now:%Y-%m-%d}.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        # Один write под замком: ни буферизация, ни параллельный add не дробят строку.
+        if os.write(fd, payload) != len(payload):
+            raise OSError("неполная запись строки журнала")
+    finally:
+        os.close(fd)
+    return record
+
+
+def resolve(records: list[dict], prefix: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{1,10}", prefix):
+        raise ValueError("префикс id должен содержать от 1 до 10 hex-символов")
+    matches = [record for record in records if record["id"].startswith(prefix)]
+    if not matches:
+        raise ValueError(f"id не найден: {prefix}")
+    if len(matches) != 1:
+        raise ValueError(f"неоднозначный префикс id: {prefix}")
+    return matches[0]
+
+
+def days(value: str) -> timedelta:
+    if not re.fullmatch(r"\d+d", value):
+        raise argparse.ArgumentTypeError("ожидался срок в днях, например 7d")
+    try:
+        return timedelta(days=int(value[:-1]))
+    except OverflowError as exc:
+        raise argparse.ArgumentTypeError("слишком большой срок") from exc
+
+
+def parser() -> argparse.ArgumentParser:
+    cli = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = cli.add_subparsers(dest="command", required=True)
+    add = commands.add_parser("add", help="добавить запись")
+    add.add_argument("--kind", choices=KINDS, required=True)
+    add.add_argument("--text")
+    add.add_argument("--why")
+    add.add_argument("--ref")
+    add.add_argument("--session")
+    add.add_argument("--prod", action="store_true", help="заменить text/why на (prod)/null")
+    for name, default in (("list", None), ("open", timedelta(days=14))):
+        listing = commands.add_parser(name, help="все записи" if name == "list" else "неразобранные решения и вопросы")
+        listing.add_argument("--repo")
+        listing.add_argument("--since", type=days, default=default, metavar="Nd")
+        if name == "list":
+            listing.add_argument("--kind", choices=KINDS)
+    show = commands.add_parser("show", help="найти запись по префиксу id")
+    show.add_argument("id")
+    mark = commands.add_parser("mark", help="добавить вердикт к решению")
+    mark.add_argument("id")
+    mark.add_argument("verdict", choices=VERDICTS)
+    mark.add_argument("--note")
+    answer = commands.add_parser("answer", help="ответить на вопрос")
+    answer.add_argument("id")
+    answer.add_argument("--text", required=True)
+    return cli
+
+
+def emit(record: dict) -> None:
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+
+
+def main() -> int:
+    cli = parser()
+    args = cli.parse_args()
+    directory = log_dir()
+    try:
+        if args.command == "add":
+            if not args.prod and (args.text is None or args.why is None):
+                cli.error("add требует --text и --why, либо --prod")
+            if not args.prod and args.kind == "verdict" and args.text not in VERDICTS:
+                cli.error("verdict требует --text keep|change|revert")
+            emit(append_record(directory, current_repo(), args.kind,
+                               "(prod)" if args.prod else args.text,
+                               None if args.prod else args.why, args.ref, args.session))
+            return 0
+        records = read_records(directory)
+        if args.command in ("show", "mark", "answer"):
+            target = resolve(records, args.id)
+            if args.command == "show":
+                emit(target)
+            else:
+                expected = "decision" if args.command == "mark" else "question"
+                if target["kind"] != expected:
+                    raise ValueError(f"{args.command} требует запись kind={expected}")
+                emit(append_record(directory, target["repo"],
+                                   "verdict" if args.command == "mark" else "answer",
+                                   args.verdict if args.command == "mark" else args.text,
+                                   args.note if args.command == "mark" else None, target["id"]))
+            return 0
+        closed = {(r["repo"], r["ref"], r["kind"]) for r in records if r["kind"] in ("answer", "verdict")}
+        cutoff = datetime.now().astimezone() - args.since if args.since is not None else None
+        for record in records:
+            if args.repo is not None and record["repo"] != args.repo:
+                continue
+            if cutoff is not None and timestamp(record) < cutoff:
+                continue
+            if args.command == "list":
+                if args.kind is not None and record["kind"] != args.kind:
+                    continue
+            else:
+                closing_kind = {"decision": "verdict", "question": "answer"}.get(record["kind"])
+                if closing_kind is None or (record["repo"], record["id"], closing_kind) in closed:
+                    continue
+            emit(record)
+        return 0
+    except (OSError, ValueError) as exc:
+        print(f"agterm-decision: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

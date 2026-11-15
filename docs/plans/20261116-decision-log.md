@@ -45,13 +45,13 @@ Claude-сессия пишет в журнал свои решения, прин
 - Create: `decision/decision_log.example.jsonl`
 - Create: `tests/decision.bats`
 
-- [ ] Python stdlib, команды: `add --kind --text --why [--ref] [--session] [--prod]`, `list [--repo] [--since 7d] [--kind]`, `show <id-prefix>`, `mark <id-prefix> keep|change|revert [--note]`, `answer <id-prefix> --text`, `open`
-- [ ] `open`: записи `decision` без `verdict` и `question` без `answer`, свежие сверху, по умолчанию за 14 дней
-- [ ] `show`/`mark`/`answer` принимают префикс id и отказывают, если он неоднозначен
-- [ ] Запись одним `write()` под `fcntl.flock`; битая строка при чтении пропускается с предупреждением в stderr
-- [ ] `decision_log.example.jsonl`: по одной строке каждого `kind`; формат меняется сначала здесь
-- [ ] `tests/decision.bats` (изолированный HOME, `DECISION_LOG_DIR` во временном каталоге, ASCII-имена тестов): каждая запись `add` проходит сверку с golden, append-only, фильтры `list`, префикс и неоднозначность, open/answer/mark, битая строка, два параллельных `add` (обе строки целые), два одинаковых `add` в одну секунду с разными id, `--prod`, `CLAUDE_CODE_SESSION_ID` → `session`, `repo` внутри worktree равен имени основной репы
-- [ ] Прогнать `bats tests/decision.bats`, должны пройти
+- [x] Python stdlib, команды: `add --kind --text --why [--ref] [--session] [--prod]`, `list [--repo] [--since 7d] [--kind]`, `show <id-prefix>`, `mark <id-prefix> keep|change|revert [--note]`, `answer <id-prefix> --text`, `open`
+- [x] `open`: записи `decision` без `verdict` и `question` без `answer`, свежие сверху, по умолчанию за 14 дней
+- [x] `show`/`mark`/`answer` принимают префикс id и отказывают, если он неоднозначен
+- [x] Запись одним `write()` под `fcntl.flock`; битая строка при чтении пропускается с предупреждением в stderr
+- [x] `decision_log.example.jsonl`: по одной строке каждого `kind`; формат меняется сначала здесь
+- [x] `tests/decision.bats` (изолированный HOME, `DECISION_LOG_DIR` во временном каталоге, ASCII-имена тестов): каждая запись `add` проходит сверку с golden, append-only, фильтры `list`, префикс и неоднозначность, open/answer/mark, битая строка, два параллельных `add` (обе строки целые), два одинаковых `add` в одну секунду с разными id, `--prod`, `CLAUDE_CODE_SESSION_ID` → `session`, `repo` внутри worktree равен имени основной репы
+- [x] Прогнать `bats tests/decision.bats`, должны пройти
 
 ### Task 2: скилл decisions
 **Depends on:** Task 3
