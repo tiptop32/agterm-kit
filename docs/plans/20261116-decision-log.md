@@ -70,7 +70,7 @@ Claude-сессия пишет в журнал свои решения, прин
 - Modify: `Makefile`
 - Modify: `README.md`
 
-- [ ] `install.sh` ставит `decision/agterm-decision` в PATH, как остальные утилиты
-- [ ] `make lint` добавляет `decision/agterm-decision` в `ast.parse`-проверку
-- [ ] README: раздел про журнал решений (команды, каталог, `--prod`)
-- [ ] Прогнать `make lint && make test`, должны пройти
+- [x] `install.sh` ставит `decision/agterm-decision` в PATH, как остальные утилиты
+- [x] `make lint` добавляет `decision/agterm-decision` в `ast.parse`-проверку
+- [x] README: раздел про журнал решений (команды, каталог, `--prod`)
+- [x] Прогнать `make lint && make test`, должны пройти

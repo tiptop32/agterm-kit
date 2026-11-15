@@ -309,8 +309,50 @@ agterm не хранит строки info после перезапуска, и
 
 Установка: `make install-gui` (хуки Claude Code и клавиша). После неё нужна новая сессия
 Claude Code и `agtermctl keymap reload`. Хук всегда завершается с кодом 0, а в настройках
-записан с `|| true`: сбой или переезд kit не мешает агенту вызывать инструменты. Работает только с Claude Code: у Codex и OpenCode
-нет хуков на скилы.
+записан с `|| true`: сбой или переезд kit не мешает агенту вызывать инструменты. Работает
+только с Claude Code: у Codex и OpenCode нет хуков на скилы.
+
+## Журнал решений
+
+Сессия Claude Code пишет в append-only журнал принятые решения и заданные вопросы, а вы
+разбираете их потом: `open` показывает неразобранное, `mark` ставит вердикт решению,
+`answer` отвечает на вопрос. Записи группируются по репозиторию (имя основного клона,
+даже из worktree) и лежат в файлах `<каталог>/<репа>/<YYYY-MM-DD>.jsonl`.
+
+### Команды
+
+`decision/agterm-decision` ставится симлинком в `~/.local/bin`:
+
+```sh
+agterm-decision add --kind decision --text 'Выбрать stdlib' --why 'Не нужны зависимости'
+agterm-decision add --kind question --text 'Нужен ли экспорт?' --why 'Формат не задан'
+agterm-decision add --kind decision --prod          # секретно: text "(prod)", why null
+agterm-decision list [--repo <репа>] [--since 7d] [--kind decision]
+agterm-decision open [--repo <репа>] [--since 30d]  # неразобранное, по умолчанию 14d
+agterm-decision show <префикс-id>
+agterm-decision mark <префикс-id> keep|change|revert [--note 'Заметка']
+agterm-decision answer <префикс-id> --text 'Ответ'
+```
+
+Все команды печатают JSONL: `add`/`mark`/`answer` — добавленную запись, `show` — исходную,
+`list`/`open` — свежие записи первыми. `show`/`mark`/`answer` ищут по префиксу id во всём
+журнале и отказывают на неоднозначном префиксе. `mark` принимает только `decision`,
+`answer` только `question`; вердикт и ответ пишутся в репозиторий исходной записи.
+
+### Каталог и формат
+
+Хранилище: `~/.local/state/decisions` (другой путь задаёт `DECISION_LOG_DIR`). Запись —
+одна строка JSON с полями `id` (10 hex-символов), `ts`, `repo`, `session`
+(`CLAUDE_CODE_SESSION_ID` или `--session`), `source`, `task_id`, `kind`
+(`decision|question|answer|verdict`), `text`, `why`, `ref`. Формат меняется сначала в
+`decision/decision_log.example.jsonl`. Битая строка при чтении пропускается с предупреждением
+в stderr, параллельные записи не дробят строки: один `write()` под `fcntl.flock`.
+
+`--prod` — для решений, затрагивающих прод: вместо текста пишется `(prod)`, `why` — `null`,
+аргументы `--text`/`--why` можно не передавать. `add` без `--prod` требует оба.
+
+Путь от корня kit. После установки симлинк вызывает файл из клона: после `git pull`
+новая версия работает сразу.
 
 ## lb-limits
 

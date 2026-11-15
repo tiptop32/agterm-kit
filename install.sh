@@ -61,6 +61,25 @@ else
     echo "конфиг создан из образца: $lb_conf. Пропишите в нём password_file, затем: $kit_dir/lb-limits/lb-limits ccstatusline"
 fi
 
+# agterm-decision: симлинк в ~/.local/bin, чтобы команда вызывалась из PATH.
+bin_dir=$HOME/.local/bin
+bin_link=$bin_dir/agterm-decision
+bin_target=$kit_dir/decision/agterm-decision
+mkdir -p "$bin_dir"
+if [[ -L $bin_link && $(readlink "$bin_link") == "$bin_target" ]]; then
+    echo "ok: $bin_link уже указывает на agterm-kit"
+else
+    # Прежний файл не удаляем: в нём могли остаться локальные правки.
+    if [[ -e $bin_link || -L $bin_link ]]; then
+        backup=$bin_link.bak.$(date +%Y%m%d%H%M%S)
+        mv "$bin_link" "$backup"
+        echo "прежний $bin_link сохранён в $backup"
+    fi
+    ln -s "$bin_target" "$bin_link"
+    echo "симлинк: $bin_link -> $bin_target"
+fi
+case :$PATH: in *":$bin_dir:"*) ;; *) echo "добавьте $bin_dir в PATH" ;; esac
+
 # resolve <путь>: файл за цепочкой симлинков. settings.json бывает симлинком в репозиторий
 # dotfiles: пишем в настоящий файл, а симлинк оставляем как есть.
 resolve() {

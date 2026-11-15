@@ -250,3 +250,25 @@ setup() {
     [[ $output == *'"agterm-ask"'* ]]
     [[ $output == *'"timeout": 3600000'* ]]
 }
+
+@test "agterm-decision: symlink in ~/.local/bin, rerun is idempotent" {
+    run "$KIT_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ "$(readlink "$HOME/.local/bin/agterm-decision")" = "$KIT_DIR/decision/agterm-decision" ]
+    DECISION_LOG_DIR="$T/log" "$HOME/.local/bin/agterm-decision" list
+
+    run "$KIT_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [[ $output == *"$HOME/.local/bin/agterm-decision уже указывает на agterm-kit"* ]]
+    ! compgen -G "$HOME/.local/bin/agterm-decision.bak.*"
+}
+
+@test "agterm-decision: previous file is kept as .bak" {
+    mkdir -p "$HOME/.local/bin"
+    echo old > "$HOME/.local/bin/agterm-decision"
+
+    run "$KIT_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOME"/.local/bin/agterm-decision.bak.*)" = old ]
+    [ "$(readlink "$HOME/.local/bin/agterm-decision")" = "$KIT_DIR/decision/agterm-decision" ]
+}
