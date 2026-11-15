@@ -354,6 +354,20 @@ agterm-decision answer <префикс-id> --text 'Ответ'
 Путь от корня kit. После установки симлинк вызывает файл из клона: после `git pull`
 новая версия работает сразу.
 
+### Скилл decisions
+
+В репозитории лежит исходник скилла Claude Code: `decision/skill/SKILL.md` описывает разбор
+журнала (`open`, затем `mark` или `answer`); вся логика в CLI, скилл только вызывает его.
+Устанавливается симлинком — ручной шаг, песочница не даёт агенту писать в `~/.claude`:
+
+```sh
+mkdir -p ~/.claude/skills
+ln -s ~/my_git_reps/agterm-kit/decision/skill ~/.claude/skills/decisions
+```
+
+Путь к клону подставьте свой. Симлинк, как и у CLI, указывает в клон: после `git pull`
+скилл обновляется вместе с репозиторием.
+
 ## lb-limits
 
 Claude Code ходит через балансер agent-lb, а встроенные виджеты ccstatusline (`session-usage`,

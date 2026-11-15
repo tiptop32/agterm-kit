@@ -59,9 +59,9 @@ Claude-сессия пишет в журнал свои решения, прин
 - Create: `decision/skill/SKILL.md`
 - Modify: `README.md`
 
-- [ ] Скилл: разбор через `agterm-decision open`, затем `mark` или `answer`. Для `change`/`revert` агент предлагает правку или follow-up через диспатчер. Вся логика в CLI, скилл только вызывает его
-- [ ] README: установка скилла симлинком `~/.claude/skills/decisions` → `decision/skill` (ручной шаг пользователя, песочница не даёт агенту писать в `~/.claude`)
-- [ ] Прогнать `make lint && make test`, должны пройти
+- [x] Скилл: разбор через `agterm-decision open`, затем `mark` или `answer`. Для `change`/`revert` агент предлагает правку или follow-up через диспатчер. Вся логика в CLI, скилл только вызывает его
+- [x] README: установка скилла симлинком `~/.claude/skills/decisions` → `decision/skill` (ручной шаг пользователя, песочница не даёт агенту писать в `~/.claude`)
+- [x] Прогнать `make lint && make test`, должны пройти
 
 ### Task 3: установка, lint и README для agterm-decision
 **Depends on:** Task 1
