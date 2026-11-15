@@ -31,6 +31,57 @@ from pathlib import Path
 KINDS = ("decision", "question", "answer", "verdict")
 VERDICTS = ("keep", "change", "revert")
 
+# Маскирование секретов перед записью: копия agent_dispatch/dispatch/redact.py
+# (redact_text), утилита на stdlib и не импортирует пакет демона. Расхождение
+# копий ловит тест паритета в tests/decision.bats, когда рядом лежит agent-dispatch.
+MASK = "[REDACTED]"
+
+
+def _bearer(match: re.Match[str]) -> str:
+    prefix, token = match.group(1), match.group(2)
+    tail = token[len(token.rstrip(".")):]
+    token = token.rstrip(".")
+    if prefix.startswith("Bearer"):
+        secret = bool(token) and not re.fullmatch(r"[a-z]{1,19}", token)
+    else:
+        secret = bool(re.search(r"[0-9._~+/=-]", token))
+    return f"{prefix}{MASK}{tail}" if secret else match.group(0)
+
+
+def _userinfo(match: re.Match[str]) -> str:
+    prefix, login, password = match.group(1), match.group(2), match.group(3)
+    host_like = "." in login or login.lower() == "localhost"
+    if host_like and re.match(r"\d+(?:[/?#]|$)", password):
+        return match.group(0)
+    return f"{prefix}{MASK}@"
+
+
+_PATTERNS = [
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+                re.DOTALL), "[REDACTED PRIVATE KEY]"),
+    (re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]*://([^\s:/@]*):)(\S+)@(?=[^\s@]+)"), _userinfo),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*"), "[REDACTED JWT]"),
+    (re.compile(r"(?i)\b(authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token|digest)\s+)?)"
+                r"[^\s\"',;]+"), rf"\g<1>{MASK}"),
+    (re.compile(r"\b(bearer\s+)([A-Za-z0-9._~+/-]+=*)", re.IGNORECASE), _bearer),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "[REDACTED KEY]"),
+    (re.compile(r"""(?ix)
+            (\b[A-Za-z0-9_.-]*(?:password|passwd|[_.-]pwd|token|secret
+                |api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key)
+             (?:\s*=\s*|["']\s*:\s*))
+            ("[^"\n]*"|'[^'\n]*'|[^\s"'&,;]+)
+            """), rf"\g<1>{MASK}"),
+]
+
+
+def redact(text: str | None) -> str | None:
+    """Текст без явных секретов (та же логика, что redact_text демона)."""
+    if not text:
+        return text
+    for pattern, replacement in _PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 def current_repo() -> str:
     try:
@@ -106,8 +157,9 @@ def append_record(directory: Path, repo: str, kind: str, text: str,
         "source": "claude",
         "task_id": None,
         "kind": kind,
-        "text": text,
-        "why": why,
+        # Журнал живёт долго и читается скиллом: секреты по форме не попадают в файл.
+        "text": redact(text),
+        "why": redact(why),
         "ref": ref,
     }
     folder = directory / repo

@@ -259,8 +259,9 @@ setup() {
 
     run "$KIT_DIR/install.sh"
     [ "$status" -eq 0 ]
-    [[ $output == *"$HOME/.local/bin/agterm-decision уже указывает на agterm-kit"* ]]
-    ! compgen -G "$HOME/.local/bin/agterm-decision.bak.*"
+    [[ $output == *"$HOME/.local/bin/agterm-decision уже указывает на agterm-kit"* ]] || false
+    run compgen -G "$HOME/.local/bin/agterm-decision.bak.*"
+    [ "$status" -ne 0 ]
 }
 
 @test "agterm-decision: previous file is kept as .bak" {

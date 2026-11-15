@@ -140,14 +140,14 @@ PY
     for prefix in aa fffff / ''; do
         run "$DECISION" show "$prefix"
         [ "$status" -ne 0 ]
-        [[ "$output" != *Traceback* ]]
+        [[ "$output" != *Traceback* ]] || false
         run "$DECISION" mark "$prefix" keep
         [ "$status" -ne 0 ]
         run "$DECISION" answer "$prefix" --text 'Ответ'
         [ "$status" -ne 0 ]
     done
     run "$DECISION" show aa
-    [[ "$output" == *неоднозначный* ]]
+    [[ "$output" == *неоднозначный* ]] || false
     cat "$DECISION_LOG_DIR"/agterm-kit/*.jsonl > "$T/after"
     cmp "$T/before" "$T/after"
 }
@@ -344,7 +344,7 @@ PY
     new=$("$DECISION" add --kind decision --text second --why w | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
     run "$DECISION" show "$new"
     [ "$status" -eq 0 ]
-    [[ $output == *'"text":"second"'* ]]
+    [[ $output == *'"text":"second"'* ]] || false
 }
 
 @test "verdict with unknown text or without ref is skipped and does not close the decision" {
@@ -352,8 +352,8 @@ PY
     run --separate-stderr "$DECISION" open
     [ "$status" -eq 0 ]
     assert_ids a000000001
-    [[ $stderr == *"verdict требует text keep|change|revert"* ]]
-    [[ $stderr == *"answer без ref"* ]]
+    [[ $stderr == *"verdict требует text keep|change|revert"* ]] || false
+    [[ $stderr == *"answer без ref"* ]] || false
 }
 
 @test "answer and verdict need ref, prod only for decision and question, huge since fails cleanly" {
@@ -366,5 +366,40 @@ PY
     [ ! -e "$DECISION_LOG_DIR" ]
     run --separate-stderr "$DECISION" open --since 999999999d
     [ "$status" -ne 0 ]
-    [[ $stderr != *Traceback* ]]
+    [[ $stderr != *Traceback* ]] || false
+}
+
+@test "add mark and answer mask secrets in text why and note before writing" {
+    d=$("$DECISION" add --kind decision --text 'db password=hunter2secret' --why 'Bearer abc.def-123' | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+    q=$("$DECISION" add --kind question --text 'key sk-proj-AAAAAAAAAAAAAAAAAAAA?' --why 'postgres://app:pa55w0rd@db.local/x' | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+    "$DECISION" mark "$d" keep --note 'api_key=zzzsecretzzz' > /dev/null
+    "$DECISION" answer "$q" --text 'token: "abc", TOKEN=qqqsecretqqq' > /dev/null
+    log=$(cat "$DECISION_LOG_DIR"/agterm-kit/*.jsonl)
+    for secret in hunter2secret abc.def-123 sk-proj-AAAA pa55w0rd zzzsecretzzz qqqsecretqqq; do
+        [[ $log != *"$secret"* ]] || false
+    done
+    [[ $log == *'[REDACTED]'* ]] || false
+    [[ $log == *'"text":"keep"'* ]] || false
+}
+
+@test "redaction matches agent-dispatch redact_text when the repo is next to agterm-kit" {
+    src=$KIT_DIR/../agent-dispatch/agent_dispatch/dispatch/redact.py
+    [ -f "$src" ] || skip "agent-dispatch рядом не найден"
+    python3 - "$src" "$DECISION" <<'PY'
+import sys, types, importlib.util
+from importlib.machinery import SourceFileLoader
+models = types.ModuleType("agent_dispatch.models"); models.ExecutionResult = object
+sys.modules.update({"agent_dispatch": types.ModuleType("agent_dispatch"), "agent_dispatch.models": models})
+spec = importlib.util.spec_from_file_location("daemon_redact", sys.argv[1]); daemon = importlib.util.module_from_spec(spec); spec.loader.exec_module(daemon)
+loader = SourceFileLoader("cli", sys.argv[2]); cli = types.ModuleType("cli"); loader.exec_module(cli)
+corpus = [
+    "password=hunter2", "DB_PASSWORD='x y'", '"api_key": "abc"', "max_tokens=100", "PWD=/tmp", "db_pwd=1",
+    "Bearer abcDEF123", "Bearer token is required", "bearer authentication", "Authorization: Basic Zm9v",
+    "postgres://u:p@host/db", "redis://:pass@cache", "host.example:8080/@scope", "localhost:5432/x@y",
+    "sk-proj-ABCDEFGHIJKLMNOPQRSTU", "eyJhbGciOi.eyJzdWIiOi.sig", "-----BEGIN RSA PRIVATE KEY-----\nAAA\n-----END RSA PRIVATE KEY-----",
+    "обычный текст без секретов", "",
+]
+for text in corpus:
+    assert cli.redact(text) == daemon.redact_text(text)[0], (text, cli.redact(text), daemon.redact_text(text)[0])
+PY
 }
