@@ -39,29 +39,38 @@ Claude-сессия пишет в журнал свои решения, прин
 ## Implementation Steps
 
 ### Task 1: CLI agterm-decision
+**Depends on:** none
 **Files:**
 - Create: `decision/agterm-decision`
 - Create: `decision/decision_log.example.jsonl`
 - Create: `tests/decision.bats`
-- Modify: `Makefile`
-- Modify: `install.sh`
-- Modify: `README.md`
 
 - [ ] Python stdlib, команды: `add --kind --text --why [--ref] [--session] [--prod]`, `list [--repo] [--since 7d] [--kind]`, `show <id-prefix>`, `mark <id-prefix> keep|change|revert [--note]`, `answer <id-prefix> --text`, `open`
 - [ ] `open`: записи `decision` без `verdict` и `question` без `answer`, свежие сверху, по умолчанию за 14 дней
 - [ ] `show`/`mark`/`answer` принимают префикс id и отказывают, если он неоднозначен
 - [ ] Запись одним `write()` под `fcntl.flock`; битая строка при чтении пропускается с предупреждением в stderr
 - [ ] `decision_log.example.jsonl`: по одной строке каждого `kind`; формат меняется сначала здесь
-- [ ] `install.sh` ставит утилиту в PATH, `make lint` добавляет её в `ast.parse`-проверку, README
 - [ ] `tests/decision.bats` (изолированный HOME, `DECISION_LOG_DIR` во временном каталоге, ASCII-имена тестов): каждая запись `add` проходит сверку с golden, append-only, фильтры `list`, префикс и неоднозначность, open/answer/mark, битая строка, два параллельных `add` (обе строки целые), два одинаковых `add` в одну секунду с разными id, `--prod`, `CLAUDE_CODE_SESSION_ID` → `session`, `repo` внутри worktree равен имени основной репы
-- [ ] Прогнать `make lint && make test`, должны пройти
+- [ ] Прогнать `bats tests/decision.bats`, должны пройти
 
 ### Task 2: скилл decisions
-**Depends on:** Task 1
+**Depends on:** Task 3
 **Files:**
 - Create: `decision/skill/SKILL.md`
 - Modify: `README.md`
 
 - [ ] Скилл: разбор через `agterm-decision open`, затем `mark` или `answer`. Для `change`/`revert` агент предлагает правку или follow-up через диспатчер. Вся логика в CLI, скилл только вызывает его
 - [ ] README: установка скилла симлинком `~/.claude/skills/decisions` → `decision/skill` (ручной шаг пользователя, песочница не даёт агенту писать в `~/.claude`)
+- [ ] Прогнать `make lint && make test`, должны пройти
+
+### Task 3: установка, lint и README для agterm-decision
+**Depends on:** Task 1
+**Files:**
+- Modify: `install.sh`
+- Modify: `Makefile`
+- Modify: `README.md`
+
+- [ ] `install.sh` ставит `decision/agterm-decision` в PATH, как остальные утилиты
+- [ ] `make lint` добавляет `decision/agterm-decision` в `ast.parse`-проверку
+- [ ] README: раздел про журнал решений (команды, каталог, `--prod`)
 - [ ] Прогнать `make lint && make test`, должны пройти
